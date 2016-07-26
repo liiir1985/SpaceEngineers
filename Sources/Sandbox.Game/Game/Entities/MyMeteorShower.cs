@@ -2,20 +2,31 @@
 using Sandbox.Common.ObjectBuilders;
 using Sandbox.Common.ObjectBuilders.Definitions;
 using Sandbox.Definitions;
+using Sandbox.Engine.Multiplayer;
 using Sandbox.Engine.Utils;
+using Sandbox.Game.Audio;
+using Sandbox.Game.Entities.Character;
 using Sandbox.Game.Multiplayer;
+using Sandbox.Game.SessionComponents;
 using Sandbox.Game.World;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Text;
+using Sandbox.Game.GameSystems;
+using VRage.Game;
+using VRage.Game.Components;
+using VRage.Game.Entity;
+using VRage.Network;
+using VRage.Serialization;
 using VRage.Utils;
 using VRageMath;
 
 namespace Sandbox.Game.Entities
 {
     [MySessionComponentDescriptor(MyUpdateOrder.NoUpdate)]
+    [StaticEventOwner]
     class MyMeteorShower : MySessionComponentBase
     {
         private static readonly int WAVES_IN_SHOWER = 4;
@@ -113,6 +124,11 @@ namespace Sandbox.Game.Entities
                 ((MyGlobalEventBase)senderEvent).Enabled = false;
                 return;
             }
+            if(Sync.IsServer == false)
+            {
+                return;
+            }
+
             m_waveCounter++;
             SetupDirVectors();
             if (m_waveCounter == 0)
@@ -129,7 +145,7 @@ namespace Sandbox.Game.Entities
                     }
                 }
                 m_currentTarget = m_targetList.ElementAt(MyUtils.GetRandomInt(m_targetList.Count - 1));
-                MySyncMeteorShower.UpdateShowerTarget(m_currentTarget);
+                MyMultiplayer.RaiseStaticEvent(x => UpdateShowerTarget, m_currentTarget);
                 m_targetList.Remove(m_currentTarget.Value);
                 m_meteorcount = (int)(Math.Pow(m_currentTarget.Value.Radius, 2) * Math.PI / 3000);
                 m_meteorcount /= (MySession.Static.EnvironmentHostility == MyEnvironmentHostilityEnum.CATACLYSM || MySession.Static.EnvironmentHostility == MyEnvironmentHostilityEnum.CATACLYSM_UNREAL) ? 1 : 10;
@@ -139,7 +155,7 @@ namespace Sandbox.Game.Entities
 
             RescheduleEvent(senderEvent);
             CheckTargetValid();
-            if (m_waveCounter < 0)
+            if ( m_waveCounter < 0 )
                 return;
 
             StartWave();
@@ -147,6 +163,9 @@ namespace Sandbox.Game.Entities
 
         private static void StartWave()
         {
+            if (!m_currentTarget.HasValue)
+                return;
+
             //m_meteorList.Add(MyMeteor.SpawnRandomLargeDebug(sphere.Center + sunDir * 500 + MyVRageUtils.GetRandomVector3Normalized() * sphere.Radius, sphere));
 
             var sunDir = MySector.DirectionToSunNormalized;
@@ -170,13 +189,25 @@ namespace Sandbox.Game.Entities
 
         private static void CheckTargetValid()
         {
-            if (!m_currentTarget.HasValue)
+            if ( !m_currentTarget.HasValue )
                 return;
+
             m_tmpEntityList.Clear();
             var bs = m_currentTarget.Value;
             m_tmpEntityList = MyEntities.GetEntitiesInSphere(ref bs);
             if (m_tmpEntityList.OfType<MyCubeGrid>().ToList().Count == 0)
                 m_waveCounter = -1;
+            if (m_waveCounter >= 0 && MyMusicController.Static != null)
+            {
+                foreach (var entity in m_tmpEntityList)
+                {
+                    if((entity is MyCharacter) && MySession.Static != null && (entity as MyCharacter) == MySession.Static.LocalCharacter)
+                    {
+                        MyMusicController.Static.MeteorShowerIncoming();
+                        break;
+                    }
+                }
+            }
             m_tmpEntityList.Clear();
         }
 
@@ -188,7 +219,7 @@ namespace Sandbox.Game.Entities
                 MyGlobalEvents.RescheduleEvent((MyGlobalEventBase)senderEvent, time);
                 m_waveCounter = -1;
                 m_currentTarget = null;
-                MySyncMeteorShower.UpdateShowerTarget(m_currentTarget);
+                MyMultiplayer.RaiseStaticEvent(x => UpdateShowerTarget,m_currentTarget);
             }
             else
             {
@@ -286,12 +317,14 @@ namespace Sandbox.Game.Entities
             for (int i = 0; i < cg.Count; i++)
             {
                 int size = (cg[i].Max - cg[i].Min + Vector3I.One).Size;
-                if (size < 16)
+
+                if (size < 16 || (MySessionComponentEntityTrigger.Static != null && MySessionComponentEntityTrigger.Static.IsActive(cg[i]) == false))
                 {
                     cg.RemoveAt(i);
                     i--;
                 }
             }
+
             while (cg.Count > 0)
             {
                 MyCubeGrid hitGrid = cg[MyUtils.GetRandomInt(cg.Count - 1)];
@@ -354,6 +387,15 @@ namespace Sandbox.Game.Entities
         public static void MeteorWave(object senderEvent)
         {
             MeteorWaveInternal(senderEvent);
+        }
+
+        [Event,Reliable,Broadcast]
+        static void UpdateShowerTarget([Serialize(MyObjectFlags.Nullable)] BoundingSphereD? target)
+        {
+            if (target.HasValue)
+                MyMeteorShower.CurrentTarget = new BoundingSphereD(target.Value.Center, target.Value.Radius);
+            else
+                MyMeteorShower.CurrentTarget = null;
         }
     }
 }

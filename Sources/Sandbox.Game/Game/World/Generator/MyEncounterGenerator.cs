@@ -1,5 +1,5 @@
 ﻿using Sandbox.Common;
-using Sandbox.Common.Components;
+
 using Sandbox.Common.ObjectBuilders;
 using Sandbox.Definitions;
 using Sandbox.Engine.Voxels;
@@ -18,13 +18,15 @@ using VRage.Voxels;
 using VRage.Serialization;
 using VRageMath;
 using Sandbox.Game.World.Generator;
+using VRage.Game;
 using VRage.Library.Utils;
 using VRage.ModAPI;
-using VRage.Components;
+using VRage.Game.Components;
+using VRage.Game.ModAPI;
 
 namespace Sandbox.Game.World.Generator
 {
-    [MySessionComponentDescriptor(MyUpdateOrder.BeforeSimulation)]
+    [MySessionComponentDescriptor(MyUpdateOrder.BeforeSimulation, 500, typeof(MyObjectBuilder_Encounters))]
     class MyEncounterGenerator : MySessionComponentBase
     {
         private const double m_minDistanceToRecognizeMovement = 100.0; 
@@ -33,7 +35,6 @@ namespace Sandbox.Game.World.Generator
         private static List<MyCubeGrid> m_createdGrids = new List<MyCubeGrid>();
         private static SerializableDictionary<MyEncounterId, Vector3D> m_movedOnlyEncounters = new SerializableDictionary<MyEncounterId, Vector3D>();
         private static List<MySpawnGroupDefinition> m_spawnGroups = new List<MySpawnGroupDefinition>();
-        private static List<MySpawnGroupDefinition> m_spawnGroupsNoVoxels = new List<MySpawnGroupDefinition>();
         private static List<int> m_randomEncounters = new List<int>();
         private static List<Vector3D> m_placePositions = new List<Vector3D>();
         private static List<MyEncounterId> m_encountersId = new List<MyEncounterId>();
@@ -108,17 +109,12 @@ namespace Sandbox.Game.World.Generator
 
             if (m_spawnGroups.Count == 0)
             {
-                m_spawnGroupsNoVoxels.Clear();
                 var allSpawnGroups = MyDefinitionManager.Static.GetSpawnGroupDefinitions();
                 foreach (var spawnGroup in allSpawnGroups)
                 {
                     if (spawnGroup.IsEncounter)
                     {
                         m_spawnGroups.Add(spawnGroup);
-                        if (spawnGroup.Voxels.Count == 0)
-                        {
-                            m_spawnGroupsNoVoxels.Add(spawnGroup);
-                        }
                     }
                 }
             }
@@ -128,8 +124,8 @@ namespace Sandbox.Game.World.Generator
                 m_randomEncounters.Clear();
                 m_placePositions.Clear();
                 m_encountersId.Clear();
-                int numEncoutersToPlace = seedType == MyObjectSeedType.EncounterMulti ? 2 : 1;
-                List<MySpawnGroupDefinition> currentSpawnGroup = seedType == MyObjectSeedType.EncounterMulti ? m_spawnGroupsNoVoxels : m_spawnGroups;
+                int numEncoutersToPlace = 1;
+                List<MySpawnGroupDefinition> currentSpawnGroup = m_spawnGroups;
 
                 for (int i = 0; i < numEncoutersToPlace; ++i)
                 {
@@ -139,7 +135,7 @@ namespace Sandbox.Game.World.Generator
                         continue;
                     }
                     m_randomEncounters.Add(PickRandomEncounter(currentSpawnGroup));
-                    Vector3D newPosition = placePosition + (i == 0 ? -1 : 1) * GetEncounterBoundingBox(currentSpawnGroup[m_randomEncounters[m_randomEncounters.Count - 1]]).HalfExtents;
+                    Vector3D newPosition = placePosition + (numEncoutersToPlace - 1) * (i == 0 ? -1 : 1) * GetEncounterBoundingBox(currentSpawnGroup[m_randomEncounters[m_randomEncounters.Count - 1]]).HalfExtents;
                     Vector3D savedPosition = Vector3D.Zero;
                     if (true == m_movedOnlyEncounters.Dictionary.TryGetValue(encounterPosition, out savedPosition))
                     {
@@ -173,7 +169,7 @@ namespace Sandbox.Game.World.Generator
                 {
                     for (int i = 0; i < m_randomEncounters.Count; ++i)
                     {
-                        SpawnEncouter(m_encountersId[i], m_placePositions[i], currentSpawnGroup, m_randomEncounters[i]);
+                        SpawnEncounter(m_encountersId[i], m_placePositions[i], currentSpawnGroup, m_randomEncounters[i]);
                     }
                 }
             }
@@ -193,22 +189,26 @@ namespace Sandbox.Game.World.Generator
             return encouterBoundingBox;
         }
 
-        private static void SpawnEncouter(MyEncounterId encounterPosition, Vector3D placePosition, List<MySpawnGroupDefinition> candidates, int selectedEncounter)
+        private static void SpawnEncounter(MyEncounterId encounterPosition, Vector3D placePosition, List<MySpawnGroupDefinition> candidates, int selectedEncounter)
         {
-            foreach (var selectedPrefab in candidates[selectedEncounter].Prefabs)
+            var spawnGroup = candidates[selectedEncounter];
+
+            long ownerId = 0; // 0 means that the owner won't be changed
+            if (spawnGroup.IsPirate)
+                ownerId = MyPirateAntennas.GetPiratesId();
+
+            foreach (var selectedPrefab in spawnGroup.Prefabs)
             {
                 m_createdGrids.Clear();
                 Vector3D direction = Vector3D.Forward;
                 Vector3D upVector = Vector3D.Up;
 
-                var spawningOptions = Sandbox.ModAPI.SpawningOptions.TurnOffReactors;
+                var spawningOptions = spawnGroup.ReactorsOn ? VRage.Game.ModAPI.SpawningOptions.None : VRage.Game.ModAPI.SpawningOptions.TurnOffReactors;
                 if (selectedPrefab.Speed > 0.0f)
                 {
-                    spawningOptions = Sandbox.ModAPI.SpawningOptions.RotateFirstCockpitTowardsDirection |
-                                     Sandbox.ModAPI.SpawningOptions.SpawnRandomCargo |
-                                     Sandbox.ModAPI.SpawningOptions.DisableDampeners;
-
-
+                    spawningOptions = VRage.Game.ModAPI.SpawningOptions.RotateFirstCockpitTowardsDirection |
+                                     VRage.Game.ModAPI.SpawningOptions.SpawnRandomCargo |
+                                     VRage.Game.ModAPI.SpawningOptions.DisableDampeners;
 
                     float centerArcRadius = (float)Math.Atan(MyNeutralShipSpawner.NEUTRAL_SHIP_FORBIDDEN_RADIUS / placePosition.Length());
                     direction = -Vector3D.Normalize(placePosition);
@@ -222,28 +222,20 @@ namespace Sandbox.Game.World.Generator
 
                     upVector = Vector3D.CalculatePerpendicularVector(direction);
                 }
-                spawningOptions |= Sandbox.ModAPI.SpawningOptions.DisableSave;
+                spawningOptions |= VRage.Game.ModAPI.SpawningOptions.DisableSave;
 
-                var prefabDefinition = MyDefinitionManager.Static.GetPrefabDefinition(selectedPrefab.SubtypeId);
-                Vector3D prefabPosDeltaValue = Vector3D.Zero;
-                if (prefabDefinition.CubeGrids.Length > 0)
-                {
-                    if (prefabDefinition.CubeGrids[0].PositionAndOrientation.HasValue)
-                    {
-                        prefabPosDeltaValue = prefabDefinition.CubeGrids[0].PositionAndOrientation.Value.Position;
-                    }
-                }
-                prefabPosDeltaValue -= prefabDefinition.BoundingSphere.Center;
+                if (selectedPrefab.PlaceToGridOrigin) spawningOptions |= SpawningOptions.UseGridOrigin;
 
                 MyPrefabManager.Static.SpawnPrefab(
                    resultList: m_createdGrids,
                    prefabName: selectedPrefab.SubtypeId,
-                   position: placePosition + selectedPrefab.Position - prefabPosDeltaValue,
+                   position: placePosition + selectedPrefab.Position,
                    forward: direction,
                    up:upVector,
                    beaconName: selectedPrefab.BeaconText,
                    initialLinearVelocity: direction * selectedPrefab.Speed,
-                   spawningOptions: spawningOptions,
+                   spawningOptions: spawningOptions | SpawningOptions.UseGridOrigin,
+                   ownerId: ownerId,
                    updateSync: true);
 
                 ProcessCreatedGrids(ref encounterPosition, selectedPrefab.Speed);
@@ -263,7 +255,7 @@ namespace Sandbox.Game.World.Generator
 
             float rnd = m_random.NextFloat(0.0f, m_spawnGroupTotalFrequencies);
             int selectedEncounter = 0;
-            while (selectedEncounter < m_spawnGroupCumulativeFrequencies.Count())
+            while (selectedEncounter < m_spawnGroupCumulativeFrequencies.Count)
             {
                 if (rnd <= m_spawnGroupCumulativeFrequencies[selectedEncounter])
                     break;
@@ -271,8 +263,8 @@ namespace Sandbox.Game.World.Generator
                 ++selectedEncounter;
             }
 
-            if (selectedEncounter >= m_spawnGroupCumulativeFrequencies.Count())
-                selectedEncounter = m_spawnGroupCumulativeFrequencies.Count() - 1;
+            if (selectedEncounter >= m_spawnGroupCumulativeFrequencies.Count)
+                selectedEncounter = m_spawnGroupCumulativeFrequencies.Count - 1;
             return selectedEncounter;
         }
 
@@ -375,7 +367,6 @@ namespace Sandbox.Game.World.Generator
             m_entityToEncounterConversion.Clear();
             m_savedEncounters.Clear();
             m_movedOnlyEncounters.Dictionary.Clear();
-            m_spawnGroupsNoVoxels.Clear();
             m_spawnGroups.Clear();
         }
 
@@ -388,10 +379,6 @@ namespace Sandbox.Game.World.Generator
                 if (spawnGroup.IsEncounter)
                 { 
                     m_spawnGroups.Add(spawnGroup);
-                    if (spawnGroup.Voxels.Count == 0)
-                    {
-                        m_spawnGroupsNoVoxels.Add(spawnGroup);
-                    }
                 }
             }
         }

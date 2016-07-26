@@ -15,6 +15,7 @@ using System.Security.Principal;
 using System.Text;
 using System.Threading;
 using System.Xml.Serialization;
+using Microsoft.Win32;
 
 using VRage.Utils;
 using VRage.Cryptography;
@@ -23,6 +24,7 @@ using VRage.Trace;
 using VRageRender;
 using VRage.Library.Utils;
 using VRage.Common.Utils;
+using VRage.Game;
 
 namespace Sandbox
 {
@@ -90,7 +92,7 @@ namespace Sandbox
             MySandboxGame.Log.WriteLine("Environment.CommandLine: " + Environment.CommandLine);
             MySandboxGame.Log.WriteLine("Environment.Is64BitProcess: " + Environment.Is64BitProcess);
             MySandboxGame.Log.WriteLine("Environment.Is64BitOperatingSystem: " + Environment.Is64BitOperatingSystem);
-            MySandboxGame.Log.WriteLine("Environment.Version: " + Environment.Version);
+            MySandboxGame.Log.WriteLine("Environment.Version: " + GetNETFromRegistry());
             MySandboxGame.Log.WriteLine("Environment.CurrentDirectory: " + Environment.CurrentDirectory);
             MySandboxGame.Log.WriteLine("MainAssembly.ProcessorArchitecture: " + Assembly.GetExecutingAssembly().GetArchitecture());
             MySandboxGame.Log.WriteLine("ExecutingAssembly.ProcessorArchitecture: " + MyFileSystem.MainAssembly.GetArchitecture());
@@ -126,6 +128,9 @@ namespace Sandbox
 
         public static void InitCheckSum()
         {
+#if XB1
+			return; //everything's fine.
+#else
             try
             {
                 var checkSumFile = Path.Combine(MyFileSystem.ContentPath, "checksum.xml");
@@ -160,6 +165,7 @@ namespace Sandbox
             catch
             {
             }
+#endif
         }
 
         #region Special exception handling
@@ -179,6 +185,7 @@ namespace Sandbox
         /// <param name="args">The <see cref="System.UnhandledExceptionEventArgs"/> instance containing the event data.</param>
         /// 
         [System.Runtime.ExceptionServices.HandleProcessCorruptedStateExceptions]
+        [System.Security.SecurityCriticalAttribute]
         private static void UnhandledExceptionHandler(object sender, UnhandledExceptionEventArgs args)
         {
             MySandboxGame.Log.AppendToClosedLog(args.ExceptionObject as Exception);
@@ -227,6 +234,21 @@ namespace Sandbox
                     MySandboxGame.Log.AppendToClosedLog(e);
                 }
             }
+            var oomEx = exception as OutOfMemoryException;
+            if (oomEx != null)
+            {
+                MySandboxGame.Log.AppendToClosedLog("Handling out of memory exception... " + MySandboxGame.Config);
+                if (MySandboxGame.Config.LowMemSwitchToLow == MyConfig.LowMemSwitch.ARMED)
+                    if (!MySandboxGame.Config.IsSetToLowQuality())
+                    {
+                        MySandboxGame.Log.AppendToClosedLog("Creating switch to low request");
+                        MySandboxGame.Config.LowMemSwitchToLow = MyConfig.LowMemSwitch.TRIGGERED;
+                        MySandboxGame.Config.Save();
+                        MySandboxGame.Log.AppendToClosedLog("Switch to low request created");
+                    }
+                MySandboxGame.Log.AppendToClosedLog(oomEx);
+            }
+
             HandleSpecialExceptions(exception.InnerException);
         }
 
@@ -282,7 +304,7 @@ namespace Sandbox
             {
                 MyRenderException renderException = e as MyRenderException;
 
-                if(renderException != null)
+                if (renderException != null)
                 {
                     MyErrorReporter.ReportRendererCrash(logPath, gameName, minimumRequirementsPage, renderException.Type);
                 }
@@ -332,5 +354,124 @@ namespace Sandbox
         }
 
         #endregion
+
+        /// <summary>
+        /// Gets .NET version. It use different way to obtain version for < 4.5 and >= 4.5 versions.
+        /// </summary>
+        /// <returns></returns>
+        private static String GetNETFromRegistry()
+        {
+            using (RegistryKey ndpKey = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry32).OpenSubKey("SOFTWARE\\Microsoft\\NET Framework Setup\\NDP\\v4\\Full\\"))
+            {
+                if (ndpKey != null && ndpKey.GetValue("Release") != null)
+                {
+                    return CheckFor45DotVersion((int)ndpKey.GetValue("Release"));
+                }
+                else
+                {
+                    return GetVersionFromRegistry();
+                }
+            }
+        }
+
+        /// <summary>
+        /// Return version from releaseKey. Only work for >=4.5 .NET.
+        /// </summary>
+        /// <param name="releaseKey"></param>
+        /// <returns></returns>
+        private static string CheckFor45DotVersion(int releaseKey)
+        {
+            if (releaseKey >= 394747)
+            {
+                return "4.6.2 or later" + " (" + releaseKey + ")";
+            }
+            if (releaseKey >= 394254)
+            {
+                return "4.6.1 or later" + " (" + releaseKey + ")";
+            }
+            if (releaseKey >= 393295)
+            {
+                return "4.6 or later" + " (" + releaseKey + ")";
+            }
+            if ((releaseKey >= 379893))
+            {
+                return "4.5.2 or later" + " (" + releaseKey + ")";
+            }
+            if ((releaseKey >= 378675))
+            {
+                return "4.5.1 or later" + " (" + releaseKey + ")";
+            }
+            if ((releaseKey >= 378389))
+            {
+                return "4.5 or later" + " (" + releaseKey + ")";
+            }
+            // This line should never execute. A non-null release key should mean
+            // that 4.5 or later is installed.
+            return "No 4.5 or later version detected";
+        }
+
+        /// <summary>
+        /// Gets version for .NET < 4.5
+        /// </summary>
+        /// <returns></returns>
+        private static String GetVersionFromRegistry()
+        {
+            // Opens the registry key for the .NET Framework entry.
+            using (RegistryKey ndpKey =
+                RegistryKey.OpenRemoteBaseKey(RegistryHive.LocalMachine, "").
+                OpenSubKey(@"SOFTWARE\Microsoft\NET Framework Setup\NDP\"))
+            {
+                String ret = "";
+                foreach (string versionKeyName in ndpKey.GetSubKeyNames())
+                {
+                    if (versionKeyName.StartsWith("v"))
+                    {
+
+                        RegistryKey versionKey = ndpKey.OpenSubKey(versionKeyName);
+                        string name = (string)versionKey.GetValue("Version", "");
+                        string sp = versionKey.GetValue("SP", "").ToString();
+                        string install = versionKey.GetValue("Install", "").ToString();
+                        if (install == "") //no install info, must be later.
+                            ret += (versionKeyName + ": " + name);
+                        else
+                        {
+                            if (sp != "" && install == "1")
+                            {
+                                ret += (versionKeyName + ": " + name + ", SP" + sp + "; ");
+                            }
+
+                        }
+                        if (name != "")
+                        {
+                            continue;
+                        }
+                        foreach (string subKeyName in versionKey.GetSubKeyNames())
+                        {
+                            RegistryKey subKey = versionKey.OpenSubKey(subKeyName);
+                            name = (string)subKey.GetValue("Version", "");
+                            if (name != "")
+                                sp = subKey.GetValue("SP", "").ToString();
+                            install = subKey.GetValue("Install", "").ToString();
+                            if (install == "") //no install info, must be later.
+                                ret += (versionKeyName + ": " + name + "; ");
+                            else
+                            {
+                                if (sp != "" && install == "1")
+                                {
+                                    ret += (subKeyName + ", " + name + ", SP" + sp + ", ");
+                                }
+                                else if (install == "1")
+                                {
+                                    ret += (subKeyName + ", " + name + ", ");
+                                }
+                            }
+                        }
+                        ret = ret.Remove(ret.Length - 2);
+                        ret += "; ";
+                    }
+                }
+                return ret;
+            }
+        }
     }
 }

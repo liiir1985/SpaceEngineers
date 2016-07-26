@@ -215,7 +215,7 @@ namespace VRageRender
                     else if (target is CubeTexture)
                     {
                         string filename = m_screenshot.GetFilename(name + ".dds");
-                        CubeTexture.ToFile(target, filename, ImageFileFormat.Dds);
+                        CubeTexture.ToFile(target, filename, SharpDX.Direct3D9.ImageFileFormat.Dds);
 
                         MyRenderProxy.ScreenshotTaken(true, filename, m_screenshot.ShowNotification);
                     }
@@ -1584,7 +1584,7 @@ namespace VRageRender
 
                         isVisibleFromQuery = query.OcclusionQuery.PixelCount > 0;
 
-                        //Holy ATI shit
+                        //Holy ATI 
                         if (query.OcclusionQuery.PixelCount < 0)
                         {
                             isVisibleFromQuery = true;

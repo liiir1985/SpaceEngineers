@@ -4,7 +4,6 @@ using Sandbox.Definitions;
 using Sandbox.Engine.Multiplayer;
 using Sandbox.Game.Entities.Cube;
 using Sandbox.Game.GameSystems;
-using Sandbox.Game.GameSystems.Electricity;
 using Sandbox.Game.Gui;
 using Sandbox.Game.Localization;
 using Sandbox.Game.Multiplayer;
@@ -12,32 +11,35 @@ using Sandbox.Game.Screens.Terminal.Controls;
 using Sandbox.Game.World;
 using Sandbox.Graphics.GUI;
 using Sandbox.ModAPI;
-using Sandbox.ModAPI.Ingame;
 using SteamSDK;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Linq;
 using System.Text;
+using Sandbox.Game.EntityComponents;
 using VRage;
 using VRage.Utils;
 using VRageMath;
+using VRage.Game;
+using VRage.Game.Components;
+using VRage.Game.ModAPI;
 
 namespace Sandbox.Game.Entities
 {
     [MyCubeBlockType(typeof(MyObjectBuilder_JumpDrive))]
-    public class MyJumpDrive : MyFunctionalBlock, IMyPowerConsumer, IMyJumpDrive
+    public class MyJumpDrive : MyFunctionalBlock, IMyJumpDrive
     {
-        private float m_storedPower = 0;
+        private readonly Sync<float> m_storedPower;
         private IMyGps m_selectedGps = null;
         private IMyGps m_jumpTarget = null;
         // From 0 to 100 percent
-        private float m_jumpDistanceRatio = 100.0f;
+        private readonly Sync<int?> m_targetSync;
+        private readonly Sync<float> m_jumpDistanceRatio;
         
         private int? m_storedJumpTarget = null;
         private float m_timeRemaining = 0.0f;
 
-        private bool m_isRecharging = false;
+        private readonly  Sync<bool> m_isRecharging;
         public bool IsJumping = false;
         private static MyGuiControlListbox m_gpsGuiControl;
 
@@ -78,8 +80,33 @@ namespace Sandbox.Game.Entities
         }
 
         #region UI
-        static MyJumpDrive()
+        public MyJumpDrive()
         {
+            CreateTerminalControls();
+
+            m_isRecharging.ValueChanged += x => RaisePropertiesChanged();   //GR: Maybe not needed since called every 100 frames either way
+            m_targetSync.ValueChanged += x => TargetChanged();
+            m_storedPower.ValidateNever();
+        }
+
+        void TargetChanged()
+        {
+            if (m_targetSync.Value.HasValue)
+            {
+                m_jumpTarget = MySession.Static.Gpss.GetGps(m_targetSync.Value.Value);
+            }
+            else
+            { 
+                 m_jumpTarget = null;
+            }
+            RaisePropertiesChanged();
+        }
+
+        static void CreateTerminalControls()
+        {
+            if (MyTerminalControlFactory.AreControlsCreated<MyJumpDrive>())
+                return;
+
             var jumpButton = new MyTerminalControlButton<MyJumpDrive>("Jump", MySpaceTexts.BlockActionTitle_Jump, MySpaceTexts.Blank, (x) => x.RequestJump());
             jumpButton.Enabled = (x) => x.CanJump;
             jumpButton.SupportsMultipleBlocks = false;
@@ -95,7 +122,7 @@ namespace Sandbox.Game.Entities
 
             var recharging = new MyTerminalControlOnOffSwitch<MyJumpDrive>("Recharge", MySpaceTexts.BlockPropertyTitle_Recharge, MySpaceTexts.Blank);
             recharging.Getter = (x) => x.m_isRecharging;
-            recharging.Setter = (x, v) => x.SetRecharging(v);
+            recharging.Setter = (x, v) => x.m_isRecharging.Value = v;
             recharging.EnableToggleAction();
             recharging.EnableOnOffActions();
             MyTerminalControlFactory.AddControl(recharging);
@@ -107,7 +134,7 @@ namespace Sandbox.Game.Entities
             maxDistanceSlider.Getter = (x) => x.m_jumpDistanceRatio;
             maxDistanceSlider.Setter = (x, v) =>
                 {
-                    x.SetJumpDistanceRatio(v);
+                    x.m_jumpDistanceRatio.Value = v;
                 };
             maxDistanceSlider.Writer = (x, v) =>
                 {
@@ -125,7 +152,7 @@ namespace Sandbox.Game.Entities
             removeBtn.Enabled = (x) => x.CanRemove();
             MyTerminalControlFactory.AddControl(removeBtn);
 
-            var selectBtn = new MyTerminalControlButton<MyJumpDrive>("SelectBtn", MySpaceTexts.SelectBlueprint, MySpaceTexts.Blank, (x) => x.SelectTarget());
+            var selectBtn = new MyTerminalControlButton<MyJumpDrive>("SelectBtn", MyCommonTexts.SelectBlueprint, MySpaceTexts.Blank, (x) => x.SelectTarget());
             selectBtn.Enabled = (x) => x.CanSelect();
             MyTerminalControlFactory.AddControl(selectBtn);
 
@@ -133,6 +160,7 @@ namespace Sandbox.Game.Entities
             gpsList.ListContent = (x, list1, list2) => x.FillGpsList(list1, list2);
             gpsList.ItemSelected = (x, y) => x.SelectGps(y);
             MyTerminalControlFactory.AddControl(gpsList);
+
             if (!MySandboxGame.IsDedicated)
             {
                 m_gpsGuiControl = (MyGuiControlListbox)((MyGuiControlBlockProperty)gpsList.GetGuiControl()).PropertyControl;
@@ -148,14 +176,8 @@ namespace Sandbox.Game.Entities
         {
             if (CanSelect())
             {
-                SyncObject.SendTargetSelected(m_selectedGps.Hash);
+                m_targetSync.Value = m_selectedGps.Hash;
             }
-        }
-
-        private void OnTargetSelected(int gpsHash)
-        {
-            m_jumpTarget = MySession.Static.Gpss.GetGps(gpsHash);
-            RaisePropertiesChangedJumpDrive();
         }
 
         private bool CanRemove()
@@ -167,47 +189,20 @@ namespace Sandbox.Game.Entities
         {
             if (CanRemove())
             {
-                SyncObject.SendTargetRemoved();
+               m_targetSync.Value = null;
             }
-        }
-
-        private void OnTargetRemoved()
-        {
-            m_jumpTarget = null;
-            RaisePropertiesChangedJumpDrive();
-        }
-
-        private void SetRecharging(bool recharging)
-        {
-            SyncObject.SendRecharging(recharging);
-        }
-
-        void OnRechargingSet(bool recharging)
-        {
-            m_isRecharging = recharging;
-            RaisePropertiesChangedJumpDrive();
-        }
-
-        private void SetJumpDistanceRatio(float jumpDistanceRatio)
-        {
-            SyncObject.SendJumpDistanceRatio(jumpDistanceRatio);
-        }
-
-        private void OnJumpDistanceRatioSet(float jumpDistanceRatio)
-        {
-            m_jumpDistanceRatio = jumpDistanceRatio;
         }
 
         private void RequestJump()
         {
             if (CanJump)
             {
-                if (MySession.LocalCharacter != null)
+                if (MySession.Static.LocalCharacter != null)
                 {
-                    var shipController = MySession.LocalCharacter.Parent as MyShipController;
-                    if (shipController == null && MySession.ControlledEntity != null)
+                    var shipController = MySession.Static.LocalCharacter.Parent as MyShipController;
+                    if (shipController == null && MySession.Static.ControlledEntity != null)
                     {
-                        shipController = MySession.ControlledEntity.Entity as MyShipController;
+                        shipController = MySession.Static.ControlledEntity.Entity as MyShipController;
                     }
 
 
@@ -252,7 +247,7 @@ namespace Sandbox.Game.Entities
         private void FillGpsList(ICollection<MyGuiControlListbox.Item> gpsItemList, ICollection<MyGuiControlListbox.Item> selectedGpsItemList)
         {
             List<IMyGps> gpsList = new List<IMyGps>();
-            MySession.Static.Gpss.GetGpsList(MySession.LocalPlayerId, gpsList);
+            MySession.Static.Gpss.GetGpsList(MySession.Static.LocalPlayerId, gpsList);
             foreach (var gps in gpsList)
             {
                 var item = new MyGuiControlListbox.Item(text: new StringBuilder(gps.Name), userData: gps);
@@ -282,7 +277,7 @@ namespace Sandbox.Game.Entities
             if (selection.Count > 0)
             {
                 m_selectedGps = (IMyGps)selection[0].UserData;
-                RaisePropertiesChangedJumpDrive();
+                RaisePropertiesChanged();
             }
         }
         #endregion
@@ -292,36 +287,34 @@ namespace Sandbox.Game.Entities
         {
             SyncFlag = true;
 
-            base.Init(objectBuilder, cubeGrid);
-            PowerReceiver = new MyPowerReceiver(
-                MyConsumerGroupEnum.Charging,
-                true,
+            var sinkComp = new MyResourceSinkComponent();
+            sinkComp.Init(
+                BlockDefinition.ResourceSinkGroup,
                 BlockDefinition.RequiredPowerInput,
                 ComputeRequiredPower);
+            ResourceSink = sinkComp;
 
-            var jumpDriveBuilder = objectBuilder as MyObjectBuilder_JumpDrive;
+            base.Init(objectBuilder, cubeGrid);
+
+            var ob = objectBuilder as MyObjectBuilder_JumpDrive;
 
             NeedsUpdate |= VRage.ModAPI.MyEntityUpdateEnum.BEFORE_NEXT_FRAME | VRage.ModAPI.MyEntityUpdateEnum.EACH_FRAME | VRage.ModAPI.MyEntityUpdateEnum.EACH_100TH_FRAME;
 
-            m_storedPower = jumpDriveBuilder.StoredPower;
-            if (m_storedPower >= BlockDefinition.PowerNeededForJump)
-            {
-                m_storedPower = BlockDefinition.PowerNeededForJump;
-            }
+            m_storedPower.Value = Math.Min(ob.StoredPower,BlockDefinition.PowerNeededForJump);
 
-            m_storedJumpTarget = jumpDriveBuilder.JumpTarget;
-            if (jumpDriveBuilder.JumpTarget != null)
+            m_storedJumpTarget = ob.JumpTarget;
+            if (ob.JumpTarget != null)
             {
-                m_jumpTarget = MySession.Static.Gpss.GetGps(jumpDriveBuilder.JumpTarget.Value);
+                m_jumpTarget = MySession.Static.Gpss.GetGps(ob.JumpTarget.Value);
             }
-
-            m_jumpDistanceRatio = jumpDriveBuilder.JumpRatio;
-            m_isRecharging = jumpDriveBuilder.Recharging;
+ 
+            m_jumpDistanceRatio.Value = ob.JumpRatio;
+            m_isRecharging.Value = ob.Recharging;
 
             SlimBlock.ComponentStack.IsFunctionalChanged += ComponentStack_IsFunctionalChanged;
             IsWorkingChanged += MyJumpDrive_IsWorkingChanged;
 
-            PowerReceiver.Update();
+			ResourceSink.Update();
             UpdateEmissivity();
         }
 
@@ -371,7 +364,7 @@ namespace Sandbox.Game.Entities
         public override void OnUnregisteredFromGridSystems()
         {
             base.OnUnregisteredFromGridSystems();
-            CheckForAbort();
+            CubeGrid.GridSystems.JumpSystem.AbortJump();
             CubeGrid.GridSystems.JumpSystem.UnregisterJumpDrive(this);
         }
 
@@ -385,6 +378,10 @@ namespace Sandbox.Game.Entities
             if (m_storedJumpTarget != null)
             {
                 m_jumpTarget = MySession.Static.Gpss.GetGps(m_storedJumpTarget.Value);
+                if (m_jumpTarget != null)
+                {
+                    m_targetSync.Value = m_jumpTarget.Hash;
+                }
             }
         }
 
@@ -392,28 +389,17 @@ namespace Sandbox.Game.Entities
         {
             base.UpdateAfterSimulation();
 
-            PowerReceiver.Update();
+			ResourceSink.Update();
         }
         public override void UpdateAfterSimulation100()
         {
             base.UpdateAfterSimulation100();
 
             if (IsFunctional)
-        {
+            {
                 if (!IsFull && m_isRecharging)
                 {
-                    StorePower(100f * MyEngineConstants.UPDATE_STEP_SIZE_IN_MILLISECONDS, PowerReceiver.CurrentInput);
-                    if (Sync.IsServer)
-                    {
-                        if (IsFull)
-                        {
-                            SyncObject.SendStoredPowerReliable(m_storedPower);
-                        }
-                        else
-                        {
-                            SyncObject.SendStoredPower(m_storedPower);
-                        }
-                    }
+                    StorePower(100f * VRage.Game.MyEngineConstants.UPDATE_STEP_SIZE_IN_MILLISECONDS, ResourceSink.CurrentInput);
                 }
             }
 
@@ -424,7 +410,7 @@ namespace Sandbox.Game.Entities
         void UpdateText()
         {
             DetailedInfo.Clear();
-            DetailedInfo.AppendStringBuilder(MyTexts.Get(MySpaceTexts.BlockPropertiesText_Type));
+            DetailedInfo.AppendStringBuilder(MyTexts.Get(MyCommonTexts.BlockPropertiesText_Type));
             DetailedInfo.Append(BlockDefinition.DisplayNameText);
             DetailedInfo.Append("\n");
             DetailedInfo.AppendStringBuilder(MyTexts.Get(MySpaceTexts.BlockPropertiesText_MaxRequiredInput));
@@ -434,7 +420,7 @@ namespace Sandbox.Game.Entities
             MyValueFormatter.AppendWorkHoursInBestUnit(BlockDefinition.PowerNeededForJump, DetailedInfo);
             DetailedInfo.Append("\n");
             DetailedInfo.AppendStringBuilder(MyTexts.Get(MySpaceTexts.BlockPropertyProperties_CurrentInput));
-            MyValueFormatter.AppendWorkInBestUnit(PowerReceiver.CurrentInput, DetailedInfo);
+			MyValueFormatter.AppendWorkInBestUnit(ResourceSink.CurrentInput, DetailedInfo);
             DetailedInfo.Append("\n");
             DetailedInfo.AppendStringBuilder(MyTexts.Get(MySpaceTexts.BlockPropertiesText_StoredPower));
             MyValueFormatter.AppendWorkHoursInBestUnit(m_storedPower, DetailedInfo);
@@ -452,30 +438,16 @@ namespace Sandbox.Game.Entities
                 float ratio = Math.Min(1.0f, (float)(maxDistance / distance));
                 DetailedInfo.Append("Current jump: " + (ratio * 100f).ToString("F2") + "%");
             }
-            RaisePropertiesChangedJumpDrive();
+            RaisePropertiesChanged();
         }
 
-        private void RaisePropertiesChangedJumpDrive()
-        {
-            int gpsFirstVisibleRow = m_gpsGuiControl != null ? m_gpsGuiControl.FirstVisibleRow : 0;
-            RaisePropertiesChanged();
-            if (m_gpsGuiControl != null && gpsFirstVisibleRow < m_gpsGuiControl.Items.Count)
-            {
-                m_gpsGuiControl.FirstVisibleRow = gpsFirstVisibleRow;
-            }
-        }
         #endregion
 
         #region Power
-        public MyPowerReceiver PowerReceiver
-        {
-            get;
-            protected set;
-        }
 
         private float ComputeRequiredPower()
         {
-            if (IsFunctional && IsWorking)
+            if (IsFunctional && IsWorking && m_isRecharging)
             {
                 if (IsFull)
                 {
@@ -503,13 +475,13 @@ namespace Sandbox.Game.Entities
                 increment *= 1000.0f;
             }
 
-            m_storedPower += increment;
+            m_storedPower.Value += increment;
 
             deltaTime /= 1000f;
 
             if (m_storedPower > BlockDefinition.PowerNeededForJump)
             {
-                m_storedPower = BlockDefinition.PowerNeededForJump;
+                m_storedPower.Value = BlockDefinition.PowerNeededForJump;
             }
             if (increment > 0f)
             {
@@ -532,7 +504,7 @@ namespace Sandbox.Game.Entities
                 filledRatio = 1f;
             }
 
-            m_storedPower = filledRatio * BlockDefinition.PowerNeededForJump;
+            m_storedPower.Value = filledRatio * BlockDefinition.PowerNeededForJump;
             UpdateEmissivity();
         }
         #endregion
@@ -545,30 +517,36 @@ namespace Sandbox.Game.Entities
             UpdateEmissivity();
         }
 
-        private void UpdateEmissivity()
+        public override void OnAddedToScene(object source)
+        {
+            base.OnAddedToScene(source);
+            UpdateEmissivity(true);
+        }
+
+        private void UpdateEmissivity(bool force = false)
         {
             if (IsFunctional && IsWorking)
             {
                 if (IsFull)
                 {
-                    SetEmissive(Color.Cyan, 1.0f, 1.0f);
+                    SetEmissive(Color.Cyan, 1.0f, 1.0f, force);
                 }
                 else if (!m_isRecharging)
                 {
-                    SetEmissive(Color.Yellow, m_storedPower / BlockDefinition.PowerNeededForJump, 1.0f);
+                    SetEmissive(Color.Yellow, m_storedPower / BlockDefinition.PowerNeededForJump, 1.0f, force);
                 }
-                else if (PowerReceiver.CurrentInput > 0f)
+				else if (ResourceSink.CurrentInput > 0f)
                 {
-                    SetEmissive(Color.Green, m_storedPower / BlockDefinition.PowerNeededForJump, 1.0f);
+                    SetEmissive(Color.Green, m_storedPower / BlockDefinition.PowerNeededForJump, 1.0f, force);
                 }
                 else
                 {
-                    SetEmissive(Color.Red, m_storedPower / BlockDefinition.PowerNeededForJump, 0.0f);
+                    SetEmissive(Color.Red, m_storedPower / BlockDefinition.PowerNeededForJump, 0.0f, force);
                 }
             }
             else
             {
-                SetEmissive(Color.Red, 1.0f, 0.0f);
+                SetEmissive(Color.Red, 1.0f, 0.0f, force);
             }
         }
 
@@ -577,200 +555,28 @@ namespace Sandbox.Game.Entities
         private Color m_prevColor = Color.White;
         private int m_prevFillCount = -1;
 
-        private void SetEmissive(Color color, float fill, float emissivity)
+        private void SetEmissive(Color color, float fill, float emissivity, bool force)
         {
             int fillCount = (int)(fill * m_emissiveNames.Length);
 
-            if (Render.RenderObjectIDs[0] != VRageRender.MyRenderProxy.RENDER_ID_UNASSIGNED && (color != m_prevColor || fillCount != m_prevFillCount))
+            if (force || Render.RenderObjectIDs[0] != VRageRender.MyRenderProxy.RENDER_ID_UNASSIGNED && (color != m_prevColor || fillCount != m_prevFillCount))
             {
                 for (int i = 0; i < m_emissiveNames.Length; i++)
                 {
                     if (i <= fillCount)
                     {
-                        VRageRender.MyRenderProxy.UpdateModelProperties(Render.RenderObjectIDs[0], 0, null, -1, m_emissiveNames[i], null, color, null, null, emissivity);
+                        UpdateNamedEmissiveParts(Render.RenderObjectIDs[0], m_emissiveNames[i], color, emissivity);
                     }
                     else
                     {
-                        VRageRender.MyRenderProxy.UpdateModelProperties(Render.RenderObjectIDs[0], 0, null, -1, m_emissiveNames[i], null, Color.Black, null, null, 0);
+                        UpdateNamedEmissiveParts(Render.RenderObjectIDs[0], m_emissiveNames[i], Color.Black, 0);
                     }
                 }
 
-                VRageRender.MyRenderProxy.UpdateModelProperties(Render.RenderObjectIDs[0], 0, null, -1, "Emissive4", null, color, null, null, emissivity);
+                UpdateNamedEmissiveParts(Render.RenderObjectIDs[0], "Emissive4", color, emissivity);
 
                 m_prevColor = color;
                 m_prevFillCount = fillCount;
-            }
-        }
-        #endregion
-
-        #region Sync
-        protected override MySyncEntity OnCreateSync()
-        {
-            return new MySyncJumpDrive(this);
-        }
-
-        internal new MySyncJumpDrive SyncObject
-        {
-            get
-            {
-                return (MySyncJumpDrive)base.SyncObject;
-            }
-        }
-
-        [PreloadRequired]
-        internal class MySyncJumpDrive : MySyncEntity
-        {
-            [MessageIdAttribute(8400, P2PMessageEnum.Reliable)]
-            protected struct SelectTargetMsg : IEntityMessage
-            {
-                public long EntityId;
-                public long GetEntityId() { return EntityId; }
-
-                public int GpsHash;
-            }
-
-            [MessageIdAttribute(8401, P2PMessageEnum.Reliable)]
-            protected struct RemoveTargetMsg : IEntityMessage
-            {
-                public long EntityId;
-                public long GetEntityId() { return EntityId; }
-            }
-
-            [MessageIdAttribute(8402, P2PMessageEnum.Reliable)]
-            protected struct SetJumpDistanceRatioMsg : IEntityMessage
-            {
-                public long EntityId;
-                public long GetEntityId() { return EntityId; }
-
-                public float JumpDistancRatio;
-            }
-
-            [MessageIdAttribute(8403, P2PMessageEnum.Unreliable)]
-            protected struct UpdateStoredPowerMsg : IEntityMessage
-            {
-                public long EntityId;
-                public long GetEntityId() { return EntityId; }
-
-                public float StoredPower;
-            }
-            
-            [MessageIdAttribute(8404, P2PMessageEnum.Reliable)]
-            protected struct UpdateStoredPowerReliableMsg : IEntityMessage
-            {
-                public long EntityId;
-                public long GetEntityId() { return EntityId; }
-
-                public float StoredPower;
-            }
-
-            [MessageIdAttribute(8405, P2PMessageEnum.Reliable)]
-            protected struct SetRechargingMsg : IEntityMessage
-            {
-                public long EntityId;
-                public long GetEntityId() { return EntityId; }
-
-                public BoolBlit Recharging;
-            }
-
-            private MyJumpDrive m_jumpDrive;
-
-            static MySyncJumpDrive()
-            {
-                MySyncLayer.RegisterEntityMessage<MySyncJumpDrive, SelectTargetMsg>(OnTargetSelected, MyMessagePermissions.Any);
-                MySyncLayer.RegisterEntityMessage<MySyncJumpDrive, RemoveTargetMsg>(OnTargetRemoved, MyMessagePermissions.Any);
-                MySyncLayer.RegisterEntityMessage<MySyncJumpDrive, SetJumpDistanceRatioMsg>(OnJumpDistanceRatioSet, MyMessagePermissions.Any);
-                MySyncLayer.RegisterEntityMessage<MySyncJumpDrive, UpdateStoredPowerMsg>(OnUpdateStoredPower, MyMessagePermissions.FromServer);
-                MySyncLayer.RegisterEntityMessage<MySyncJumpDrive, UpdateStoredPowerReliableMsg>(OnUpdateStoredPowerReliable, MyMessagePermissions.FromServer);
-                MySyncLayer.RegisterEntityMessage<MySyncJumpDrive, SetRechargingMsg>(OnSetRecharging, MyMessagePermissions.Any);
-            }
-
-            public MySyncJumpDrive(MyJumpDrive jumpDrive)
-                : base(jumpDrive)
-            {
-                m_jumpDrive = jumpDrive;
-            }
-
-            public void SendTargetSelected(int gpsHash)
-            {
-                var msg = new SelectTargetMsg();
-                msg.EntityId = m_jumpDrive.EntityId;
-                msg.GpsHash = gpsHash;
-
-                Sync.Layer.SendMessageToAllAndSelf(ref msg);
-            }
-
-            private static void OnTargetSelected(MySyncJumpDrive syncObject, ref SelectTargetMsg msg, MyNetworkClient sender)
-            {
-                syncObject.m_jumpDrive.OnTargetSelected(msg.GpsHash);
-            }
-
-            public void SendTargetRemoved()
-            {
-                var msg = new RemoveTargetMsg();
-                msg.EntityId = m_jumpDrive.EntityId;
-
-                Sync.Layer.SendMessageToAllAndSelf(ref msg);
-            }
-
-            private static void OnTargetRemoved(MySyncJumpDrive syncObject, ref RemoveTargetMsg msg, MyNetworkClient sender)
-            {
-                syncObject.m_jumpDrive.OnTargetRemoved();
-            }
-
-            public void SendJumpDistanceRatio(float jumpDistanceRatio)
-            {
-                var msg = new SetJumpDistanceRatioMsg();
-                msg.EntityId = m_jumpDrive.EntityId;
-                msg.JumpDistancRatio = jumpDistanceRatio;
-
-                Sync.Layer.SendMessageToAllAndSelf(ref msg);
-            }
-
-            private static void OnJumpDistanceRatioSet(MySyncJumpDrive syncObject, ref SetJumpDistanceRatioMsg msg, MyNetworkClient sender)
-            {
-                syncObject.m_jumpDrive.OnJumpDistanceRatioSet(msg.JumpDistancRatio);
-            }
-
-            public void SendStoredPower(float storedPower)
-            {
-                var msg = new UpdateStoredPowerMsg();
-                msg.EntityId = m_jumpDrive.EntityId;
-                msg.StoredPower = storedPower;
-
-                Sync.Layer.SendMessageToAll(ref msg);
-            }
-
-            private static void OnUpdateStoredPower(MySyncJumpDrive syncObject, ref UpdateStoredPowerMsg msg, MyNetworkClient sender)
-            {
-                syncObject.m_jumpDrive.m_storedPower = msg.StoredPower;
-            }
-
-            public void SendStoredPowerReliable(float storedPower)
-            {
-                var msg = new UpdateStoredPowerReliableMsg();
-                msg.EntityId = m_jumpDrive.EntityId;
-                msg.StoredPower = storedPower;
-
-                Sync.Layer.SendMessageToAll(ref msg);
-            }
-
-            private static void OnUpdateStoredPowerReliable(MySyncJumpDrive syncObject, ref UpdateStoredPowerReliableMsg msg, MyNetworkClient sender)
-            {
-                syncObject.m_jumpDrive.m_storedPower = msg.StoredPower;
-            }
-
-            public void SendRecharging(bool recharging)
-            {
-                var msg = new SetRechargingMsg();
-                msg.EntityId = m_jumpDrive.EntityId;
-                msg.Recharging = recharging;
-
-                Sync.Layer.SendMessageToAllAndSelf(ref msg);
-            }
-
-            private static void OnSetRecharging(MySyncJumpDrive syncObject, ref SetRechargingMsg msg, MyNetworkClient sender)
-            {
-                syncObject.m_jumpDrive.OnRechargingSet(msg.Recharging);
             }
         }
         #endregion

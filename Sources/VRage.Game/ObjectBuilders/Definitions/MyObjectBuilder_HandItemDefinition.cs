@@ -2,9 +2,27 @@
 using ProtoBuf;
 using VRageMath;
 using System.ComponentModel;
+using System.Collections.Generic;
+using System.Xml.Serialization;
 
-namespace Sandbox.Common.ObjectBuilders.Definitions
+namespace VRage.Game
 {
+    /// <summary>
+    /// Enumeration defining where to get the weapon transform from.
+    /// This does not include behavior of arms (anim/ik), which is driven separately by variables SimulateLeftHand and SimulateRightHand.
+    /// </summary>
+    public enum MyItemPositioningEnum
+    {
+        /// <summary>
+        /// Weapon is placed according to sbc data file.
+        /// </summary>
+        TransformFromData,
+        /// <summary>
+        /// Weapon is placed according to animation.
+        /// </summary>
+        TransformFromAnim
+    }
+
     [ProtoContract]
     [MyObjectBuilderDefinition]
     public class MyObjectBuilder_HandItemDefinition : MyObjectBuilder_DefinitionBase
@@ -127,5 +145,34 @@ namespace Sandbox.Common.ObjectBuilders.Definitions
 
         [ProtoMember]
         public float ShakeAmountNoTarget;
+
+        [ProtoMember]
+        public List<ToolSound> ToolSounds;
+
+        [ProtoMember]
+        public MyItemPositioningEnum ItemPositioning = MyItemPositioningEnum.TransformFromData;
+        [ProtoMember]
+        public MyItemPositioningEnum ItemPositioning3rd = MyItemPositioningEnum.TransformFromData;
+        [ProtoMember]
+        public MyItemPositioningEnum ItemPositioningWalk = MyItemPositioningEnum.TransformFromData;
+        [ProtoMember]
+        public MyItemPositioningEnum ItemPositioningWalk3rd = MyItemPositioningEnum.TransformFromData;
+        [ProtoMember]
+        public MyItemPositioningEnum ItemPositioningShoot = MyItemPositioningEnum.TransformFromData;
+        [ProtoMember]
+        public MyItemPositioningEnum ItemPositioningShoot3rd = MyItemPositioningEnum.TransformFromData;
+    }
+
+    [ProtoContract, XmlType("ToolSound")]
+    public struct ToolSound
+    {
+        [ProtoMember, XmlAttribute]
+        public string type;
+
+        [ProtoMember, XmlAttribute]
+        public string subtype;
+
+        [ProtoMember, XmlAttribute]
+        public string sound;
     }
 }

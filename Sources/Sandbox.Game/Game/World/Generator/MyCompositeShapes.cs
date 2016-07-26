@@ -1,7 +1,10 @@
-﻿using Sandbox.Definitions;
+﻿
+using Sandbox.Definitions;
+using Sandbox.Engine.Utils;
 using Sandbox.Engine.Voxels;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -15,10 +18,11 @@ using VRageMath;
 namespace Sandbox.Game.World.Generator
 {
     internal delegate void MyCompositeShapeGeneratorDelegate(int seed, float size, out MyCompositeShapeGeneratedData data);
-    internal delegate void MyCompositeShapeGeneratorPlanetDelegate(ref MyCsgShapePlanetShapeAttributes shapeAttributes, float maxHillHeight, ref MyCsgShapePlanetMaterialAttributes materialAttributes, out MyCompositeShapeGeneratedData data);
-
+    
     internal static class MyCompositeShapes
     {
+        public const float PLANET_SCALE_FACTOR = 1.2f;
+
         private static readonly List<MyVoxelMaterialDefinition> m_surfaceMaterials = new List<MyVoxelMaterialDefinition>();
         private static readonly List<MyVoxelMaterialDefinition> m_depositMaterials = new List<MyVoxelMaterialDefinition>();
         private static readonly List<MyVoxelMaterialDefinition> m_coreMaterials = new List<MyVoxelMaterialDefinition>();
@@ -32,11 +36,6 @@ namespace Sandbox.Game.World.Generator
             Generator0,
             Generator1,
             Generator2,
-        };
-
-        public static readonly MyCompositeShapeGeneratorPlanetDelegate[] PlanetGenerators = new MyCompositeShapeGeneratorPlanetDelegate[]
-        {
-            PlanetGenerator0,
         };
 
         private static void Generator0(int seed, float size, out MyCompositeShapeGeneratedData data)
@@ -53,60 +52,6 @@ namespace Sandbox.Game.World.Generator
         private static void Generator2(int seed, float size, out MyCompositeShapeGeneratedData data)
         {
             Generator(2, seed, size, out data);
-        }
-        private static void PlanetGenerator0(ref MyCsgShapePlanetShapeAttributes shapeAttributes, float maxHillHeight, ref MyCsgShapePlanetMaterialAttributes materialAttributes, out MyCompositeShapeGeneratedData data)
-        {
-            PlanetGenerator(ref shapeAttributes, maxHillHeight, ref materialAttributes, out data);
-        }
-
-
-        private static void PlanetGenerator(ref MyCsgShapePlanetShapeAttributes shapeAttributes, float maxHillHeight, ref MyCsgShapePlanetMaterialAttributes materialAttributes, out MyCompositeShapeGeneratedData data)
-        {
-            var random = MyRandom.Instance;
-            using (var stateToken = random.PushSeed(shapeAttributes.Seed))
-            {
-                data = new MyCompositeShapeGeneratedData();
-                data.FilledShapes = new MyCsgShapeBase[1];
-                data.RemovedShapes = new MyCsgShapeBase[0];
-
-
-                data.MacroModule = null;
-
-                data.DetailModule = null;
-
-                float halfSize = shapeAttributes.Radius;
-                float storageSize = VRageMath.MathHelper.GetNearestBiggerPowerOfTwo(shapeAttributes.Diameter);
-                float halfStorageSize = storageSize * 0.5f;
-                float storageOffset = halfStorageSize - halfSize;
-
-                string planetPath = Path.Combine(MyFileSystem.ContentPath,"Data","PlanetDataFiles","Test");
-                data.FilledShapes[0] = new MyCsgShapePrecomputed(new Vector3(halfStorageSize), shapeAttributes.AveragePlanetRadius, planetPath, maxHillHeight);
-                    /*MyCsgShapePlanet(
-                                        new Vector3(halfStorageSize),
-                                        ref shapeAttributes,
-                                        ref hillAttributes,
-                                        ref canyonAttributes,
-                                        detailFrequency: 0.5f,
-                                        deviationFrequency: 10.0f);*/
-
-                FillMaterials(2);
-
-                data.DefaultMaterial = m_surfaceMaterials[(int)random.Next() % m_surfaceMaterials.Count];
-
-                int depositCount = 1;
-                data.Deposits = new MyCompositeShapeOreDeposit[depositCount];
-
-
-                data.Deposits[0] = new MyCompositePrecomputedOreDeposit(new MyCsgSimpleSphere(
-                                                                    new Vector3(halfStorageSize), halfSize),
-                                                                    planetPath,
-                                                                    new MyCompositeOrePlanetDeposit(new MyCsgSimpleSphere(new Vector3(halfStorageSize), materialAttributes.OreStartDepth), shapeAttributes.Seed, materialAttributes.OreStartDepth, materialAttributes.OreEndDepth, materialAttributes.OreProbabilities),
-                                                                    data.FilledShapes[0] as MyCsgShapePrecomputed );       
-
-                m_depositMaterials.Clear();
-                m_surfaceMaterials.Clear();
-                m_coreMaterials.Clear();
-            }
         }
 
         private static MyVoxelMaterialDefinition GetMaterialByName(String name)
@@ -356,7 +301,21 @@ namespace Sandbox.Game.World.Generator
                     };
                     shuffleMaterials(m_depositMaterials);
 
-                    data.DefaultMaterial = m_surfaceMaterials[(int)random.Next() % m_surfaceMaterials.Count];
+                    if (m_surfaceMaterials.Count == 0)
+                    {
+                        if (m_depositMaterials.Count == 0)
+                        {
+                            data.DefaultMaterial = m_coreMaterials[(int)random.Next() % m_coreMaterials.Count];
+                        }
+                        else
+                        {
+                            data.DefaultMaterial = m_depositMaterials[(int)random.Next() % m_depositMaterials.Count];
+                        }
+                    }
+                    else
+                    {
+                        data.DefaultMaterial = m_surfaceMaterials[(int)random.Next() % m_surfaceMaterials.Count];
+                    }
 
                     if (false)
                     {
@@ -392,11 +351,32 @@ namespace Sandbox.Game.World.Generator
                             MyVoxelMaterialDefinition material;
                             if (i == 0)
                             {
-                                material = m_coreMaterials[(int)random.Next() % m_coreMaterials.Count];
+                                if (m_coreMaterials.Count == 0)
+                                {
+                                    if (m_depositMaterials.Count == 0)
+                                    {
+                                        material = m_surfaceMaterials[(int)random.Next() % m_surfaceMaterials.Count];
+                                    }
+                                    else
+                                    {
+                                        material = m_depositMaterials[currentMaterial++];
+                                    }
+                                }
+                                else
+                                {
+                                    material = m_coreMaterials[(int)random.Next() % m_coreMaterials.Count];
+                                }
                             }
                             else
                             {
-                                material = m_depositMaterials[currentMaterial++];
+                                if (m_depositMaterials.Count == 0)
+                                {
+                                    material = m_surfaceMaterials[(int)random.Next() % m_surfaceMaterials.Count];
+                                }
+                                else
+                                {
+                                    material = m_depositMaterials[currentMaterial++];
+                                }
                             }
                             data.Deposits[i] = new MyCompositeShapeOreDeposit(data.FilledShapes[i].DeepCopy(), material);
                             data.Deposits[i].Shape.ShrinkTo(random.NextFloat() * 0.15f + 0.6f);
@@ -412,11 +392,35 @@ namespace Sandbox.Game.World.Generator
                             var radius = random.NextFloat() * depositSize + 8f;
                             random.NextFloat();random.NextFloat();//backwards compatibility
                             MyCsgShapeBase shape = new MyCsgSphere(center, radius);
-                            data.Deposits[i] = new MyCompositeShapeOreDeposit(shape, m_depositMaterials[currentMaterial++]);
-                            if (currentMaterial == m_depositMaterials.Count)
+
+                            MyVoxelMaterialDefinition material;
+                            if (m_depositMaterials.Count == 0)
                             {
-                                currentMaterial = 0;
-                                shuffleMaterials(m_depositMaterials);
+                                material = m_surfaceMaterials[currentMaterial++];
+                            }
+                            else
+                            {
+                                material = m_depositMaterials[currentMaterial++];
+                            }
+
+                            data.Deposits[i] = new MyCompositeShapeOreDeposit(shape, material);
+
+                            if (m_depositMaterials.Count == 0)
+                            {
+                                if (currentMaterial == m_surfaceMaterials.Count)
+                                {
+                                    currentMaterial = 0;
+                                    shuffleMaterials(m_surfaceMaterials);
+                                }
+                            }
+                            else
+                            {
+
+                                if (currentMaterial == m_depositMaterials.Count)
+                                {
+                                    currentMaterial = 0;
+                                    shuffleMaterials(m_depositMaterials);
+                                }
                             }
                         }
                     }
@@ -459,7 +463,7 @@ namespace Sandbox.Game.World.Generator
                     m_depositMaterials.Add(material);
             }
 
-            if (m_surfaceMaterials.Count == 0) // this can happen if all materials are disabled or set to not spawn in asteroids
+            if (m_surfaceMaterials.Count == 0 && m_depositMaterials.Count == 0) // this can happen if all materials are disabled or set to not spawn in asteroids
                 throw new Exception("There are no voxel materials allowed to spawn in asteroids!");
         }
 

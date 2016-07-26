@@ -1,10 +1,8 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using Sandbox.Game.Weapons;
-using Sandbox.Common.Components;
+﻿using Sandbox.Game.Weapons;
+
+using Sandbox.Game.EntityComponents;
 using VRageMath;
+using VRage.Game.Components;
 
 namespace Sandbox.Game.Components
 {
@@ -18,7 +16,7 @@ namespace Sandbox.Game.Components
             m_turretBase = turretBase;
         }
 
-        public override bool DebugDraw()
+        public override void DebugDraw()
         {
             float radius = 0.0f;
             if (m_turretBase.Render.GetModel() != null)
@@ -53,9 +51,11 @@ namespace Sandbox.Game.Components
 
             //VRageRender.MyRenderProxy.DebugDrawSphere(GetPosition(), ShootingRange, Vector3.One, 1, false);
 
-            m_turretBase.PowerReceiver.DebugDraw(m_turretBase.PositionComp.WorldMatrix);
+	        var sinkComp = m_turretBase.Components.Get<MyResourceSinkComponent>();
+			if(sinkComp != null)
+			  sinkComp.DebugDraw(m_turretBase.PositionComp.WorldMatrix);
 
-            return base.DebugDraw();
+            base.DebugDraw();
         }
     }
 }

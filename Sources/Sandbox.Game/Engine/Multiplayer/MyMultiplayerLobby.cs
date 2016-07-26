@@ -16,8 +16,11 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using VRage;
+using VRage.Game;
 using VRage.Utils;
 using VRage.Trace;
+using VRage.Library.Utils;
+using VRage.Network;
 
 
 #endregion
@@ -27,21 +30,21 @@ namespace Sandbox.Engine.Multiplayer
     /// <summary>
     /// Container of multiplayer classes
     /// </summary>
-    public class MyMultiplayerLobby : MyMultiplayerBase
+    public class MyMultiplayerLobby : MyMultiplayerServerBase
     {
         public readonly Lobby Lobby;
 
-        public override bool IsServer { get { return ServerId == MySteam.UserId; } }
+        public override bool IsServer { get { return ServerId == Sync.MyId; } }
 
         public override string WorldName
         {
             get { return GetLobbyWorldName(Lobby); }
-            set { Lobby.SetLobbyData(MyMultiplayer.WorldNameTag, value); }
+            set { Lobby.SetLobbyData(MyMultiplayer.WorldNameTag, value ?? "Unnamed"); }
         }
 
         public override MyGameModeEnum GameMode
         {
-            get 
+            get
             {
                 return GetLobbyGameMode(Lobby);
             }
@@ -153,7 +156,7 @@ namespace Sandbox.Engine.Multiplayer
         public override string ScenarioBriefing
         {
             get { return Lobby.GetLobbyData(MyMultiplayer.ScenarioBriefingTag); }
-            set { Lobby.SetLobbyData(MyMultiplayer.ScenarioBriefingTag, (value==null || value.Length<1?" ":value)); }
+            set { Lobby.SetLobbyData(MyMultiplayer.ScenarioBriefingTag, (value == null || value.Length < 1 ? " " : value)); }
         }
 
         public override DateTime ScenarioStartTime
@@ -166,6 +169,12 @@ namespace Sandbox.Engine.Multiplayer
         {
             get { return GetLobbyBool(MyMultiplayer.BattleTag, Lobby, false); }
             set { Lobby.SetLobbyData(MyMultiplayer.BattleTag, value.ToString()); }
+        }
+
+        public override float BattleRemainingTime
+        {
+            get { return GetLobbyFloat(MyMultiplayer.BattleRemainingTimeTag, Lobby, 0); }
+            set { Lobby.SetLobbyData(MyMultiplayer.BattleRemainingTimeTag, value.ToString(CultureInfo.InvariantCulture)); }
         }
 
         public override bool BattleCanBeJoined
@@ -256,23 +265,16 @@ namespace Sandbox.Engine.Multiplayer
 
 
         internal MyMultiplayerLobby(Lobby lobby, MySyncLayer syncLayer)
-            : base(syncLayer)
+            : base(syncLayer, new EndpointId(Sync.MyId))
         {
             Lobby = lobby;
             ServerId = Lobby.GetOwner();
 
             SyncLayer.RegisterClientEvents(this);
 
-            if (IsServer)
-            {
-                HostName = MySteam.UserName;
-            }
-            else
-            {
-                SyncLayer.TransportLayer.IsBuffering = true;
-            }
-
-            SyncLayer.RegisterMessageImmediate<AllMembersDataMsg>(OnAllMembersData, MyMessagePermissions.Any);
+            HostName = MySteam.UserName;
+           
+            Debug.Assert(IsServer, "Wrong object created");
 
             MySteam.API.Matchmaking.LobbyChatUpdate += Matchmaking_LobbyChatUpdate;
             MySteam.API.Matchmaking.LobbyChatMsg += Matchmaking_LobbyChatMsg;
@@ -282,7 +284,10 @@ namespace Sandbox.Engine.Multiplayer
 
         void MyMultiplayerLobby_ClientLeft(ulong userId, ChatMemberStateChangeEnum stateChange)
         {
-            Peer2Peer.CloseSession(userId);
+            if (userId == ServerId)
+            {
+                Peer2Peer.CloseSession(userId);
+            }
 
             MySandboxGame.Log.WriteLineAndConsole("Player left: " + GetMemberName(userId) + " (" + userId + ")");
             MyTrace.Send(TraceWindow.Multiplayer, "Player left: " + stateChange.ToString());
@@ -312,8 +317,10 @@ namespace Sandbox.Engine.Multiplayer
                         RaiseClientJoined(changedUser);
 
                         // Battles - send all clients, identities, players, factions as first message to client
-                        if (Sync.IsServer && (Battle||Scenario) && changedUser != MySteam.UserId)
+                        if ((Battle || Scenario) && changedUser != Sync.MyId)
+                        {
                             SendAllMembersDataToClient(changedUser);
+                        }
                     }
 
                     if (MySandboxGame.IsGameReady && changedUser != ServerId)
@@ -325,7 +332,7 @@ namespace Sandbox.Engine.Multiplayer
 
                         if (showMsg)
                         {
-                            var playerJoined = new MyHudNotification(MySpaceTexts.NotificationClientConnected, 5000, level: MyNotificationLevel.Important);
+                            var playerJoined = new MyHudNotification(MyCommonTexts.NotificationClientConnected, 5000, level: MyNotificationLevel.Important);
                             playerJoined.SetTextFormatArguments(MySteam.API.Friends.GetPersonaName(changedUser));
                             MyHud.Notifications.Add(playerJoined);
                         }
@@ -344,8 +351,8 @@ namespace Sandbox.Engine.Multiplayer
 
                         MyGuiScreenMainMenu.UnloadAndExitToMenu();
                         MyGuiSandbox.AddScreen(MyGuiSandbox.CreateMessageBox(
-                            messageCaption: MyTexts.Get(MySpaceTexts.MessageBoxCaptionError),
-                            messageText: MyTexts.Get(MySpaceTexts.MultiplayerErrorServerHasLeft)));
+                            messageCaption: MyTexts.Get(MyCommonTexts.MessageBoxCaptionError),
+                            messageText: MyTexts.Get(MyCommonTexts.MultiplayerErrorServerHasLeft)));
 
                         // Set new server
                         //ServerId = Lobby.GetOwner();
@@ -357,7 +364,7 @@ namespace Sandbox.Engine.Multiplayer
                     }
                     else if (MySandboxGame.IsGameReady)
                     {
-                        var playerLeft = new MyHudNotification(MySpaceTexts.NotificationClientDisconnected, 5000, level: MyNotificationLevel.Important);
+                        var playerLeft = new MyHudNotification(MyCommonTexts.NotificationClientDisconnected, 5000, level: MyNotificationLevel.Important);
                         playerLeft.SetTextFormatArguments(MySteam.API.Friends.GetPersonaName(changedUser));
                         MyHud.Notifications.Add(playerLeft);
                     }
@@ -378,8 +385,10 @@ namespace Sandbox.Engine.Multiplayer
             for (int i = 0; i < Lobby.MemberCount; i++)
             {
                 var member = Lobby.GetLobbyMemberByIndex(i);
-                if (member != MySteam.UserId)
+                if (member != Sync.MyId && member == ServerId)
+                {
                     Peer2Peer.AcceptSession(member);
+                }
             }
         }
 
@@ -412,7 +421,7 @@ namespace Sandbox.Engine.Multiplayer
         {
             System.Diagnostics.Debug.Fail("Ban is not supported in lobbies");
         }
-       
+
         public override void Tick()
         {
             base.Tick();
@@ -420,10 +429,12 @@ namespace Sandbox.Engine.Multiplayer
             // TODO: Hack for invisible battle games - sometimes values are not written to Lobby so we try it again here
             if (!m_serverDataValid)
             {
-                if (AppVersion == 0) 
+                ProfilerShort.Begin("Battle hack");
+                if (AppVersion == 0)
                     MySession.Static.StartServer(this);
 
                 m_serverDataValid = true;
+                ProfilerShort.End();
             }
 
             //var delta = TimeSpan.FromMilliseconds(SyncLayer.Interpolation.Timer.AverageDeltaMilliseconds);
@@ -470,7 +481,7 @@ namespace Sandbox.Engine.Multiplayer
             MySteam.API.Matchmaking.LobbyChatUpdate -= Matchmaking_LobbyChatUpdate;
             //MySteam.API.Matchmaking.LobbyDataUpdate -= Matchmaking_LobbyDataUpdate;
             MySteam.API.Matchmaking.LobbyChatMsg -= Matchmaking_LobbyChatMsg;
-            
+
             if (Lobby.IsValid)
             {
                 MyTrace.Send(TraceWindow.Multiplayer, "Leaving lobby");
@@ -504,7 +515,7 @@ namespace Sandbox.Engine.Multiplayer
         public override int MemberLimit
         {
             get { return Lobby.MemberLimit; }
-            set {  }
+            set { }
         }
 
         public override bool IsAdmin(ulong steamID)
@@ -539,7 +550,7 @@ namespace Sandbox.Engine.Multiplayer
 
         public static bool IsLobbyCorrectVersion(Lobby lobby)
         {
-            return GetLobbyAppVersion(lobby) == Sandbox.Common.MyFinalBuildConstants.APP_VERSION;
+            return GetLobbyAppVersion(lobby) == MyFinalBuildConstants.APP_VERSION;
         }
 
         public static MyGameModeEnum GetLobbyGameMode(Lobby lobby)
@@ -697,6 +708,11 @@ namespace Sandbox.Engine.Multiplayer
             return GetLobbyBool(MyMultiplayer.BattleTag, lobby, false);
         }
 
+        public static float GetLobbyBattleRemainingTime(Lobby lobby)
+        {
+            return GetLobbyFloat(MyMultiplayer.BattleRemainingTimeTag, lobby, 0);
+        }
+
         public static bool GetLobbyBattleCanBeJoined(Lobby lobby)
         {
             return GetLobbyBool(MyMultiplayer.BattleCanBeJoinedTag, lobby, false);
@@ -721,12 +737,12 @@ namespace Sandbox.Engine.Multiplayer
         {
             RaiseClientKicked(data.KickedClient);
 
-            if (data.KickedClient == MySteam.UserId)
+            if (data.KickedClient == Sync.MyId)
             {
                 MyGuiScreenMainMenu.ReturnToMainMenu();
                 MyGuiSandbox.AddScreen(MyGuiSandbox.CreateMessageBox(
-                    messageCaption: MyTexts.Get(MySpaceTexts.MessageBoxCaptionKicked),
-                    messageText: MyTexts.Get(MySpaceTexts.MessageBoxTextYouHaveBeenKicked)));
+                    messageCaption: MyTexts.Get(MyCommonTexts.MessageBoxCaptionKicked),
+                    messageText: MyTexts.Get(MyCommonTexts.MessageBoxTextYouHaveBeenKicked)));
             }
             else
             {
@@ -743,17 +759,6 @@ namespace Sandbox.Engine.Multiplayer
         protected override void OnPing(ref MyControlPingMsg data, ulong sender)
         {
             SendControlMessage(sender, ref data);
-        }
-
-        public void OnAllMembersData(ref AllMembersDataMsg msg, MyNetworkClient sender)
-        {
-            if (Sync.IsServer)
-            {
-                Debug.Fail("Members data cannot be sent to server");
-                return;
-            }
-
-            ProcessAllMembersData(ref msg);
         }
     }
 }

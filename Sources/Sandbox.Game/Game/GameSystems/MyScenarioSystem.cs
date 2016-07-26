@@ -4,10 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
-using Medieval.Entities;
-using Medieval.ObjectBuilders;
 using Sandbox.Common;
-using Sandbox.Common.ObjectBuilders.Voxels;
 using Sandbox.Engine.Networking;
 using Sandbox.Engine.Utils;
 using Sandbox.Engine.Voxels;
@@ -35,11 +32,12 @@ using VRage.Utils;
 using Sandbox.Definitions;
 using Sandbox.Game.Screens.Helpers;
 using Sandbox.Engine.Physics;
-using Sandbox.Common.ModAPI;
 using Sandbox.Game.GUI;
 using Sandbox.Game.Screens;
 using Sandbox.Game.Localization;
 using VRage;
+using VRage.Game;
+using VRage.Game.Components;
 
 namespace Sandbox.Game.GameSystems
 {
@@ -131,7 +129,7 @@ namespace Sandbox.Game.GameSystems
 
                     foreach (var playerId in m_playersReadyForBattle)
                     {
-                        if (playerId != MySteam.UserId)
+                        if (playerId != Sync.MyId)
                             MySyncScenario.StartScenarioRequest(playerId, ServerStartGameTime.Ticks);
                     }
                 }
@@ -198,6 +196,8 @@ namespace Sandbox.Game.GameSystems
                         ServerPreparationStartTime = DateTime.UtcNow;
                         MyMultiplayer.Static.ScenarioStartTime = ServerPreparationStartTime;
                         GameState = MyState.Running;
+                        if (!MySandboxGame.IsDedicated)
+                            StartScenario();
                         return;
                     }
                     if (MySession.Static.OnlineMode == MyOnlineModeEnum.OFFLINE || MyMultiplayer.Static != null)
@@ -210,7 +210,7 @@ namespace Sandbox.Game.GameSystems
                         MyGuiScreenScenarioMpServer guiscreen = new MyGuiScreenScenarioMpServer();
                         guiscreen.Briefing = MySession.Static.GetWorld().Checkpoint.Briefing;
                         MyGuiSandbox.AddScreen(guiscreen);
-                        m_playersReadyForBattle.Add(MySteam.UserId);
+                        m_playersReadyForBattle.Add(Sync.MyId);
                         GameState = MyState.JoinScreen;
                     }
                     break;
@@ -224,7 +224,7 @@ namespace Sandbox.Game.GameSystems
                         StartScenario();
                         foreach (var playerId in m_playersReadyForBattle)
                         {
-                            if (playerId != MySteam.UserId)
+                            if (playerId != Sync.MyId)
                                 MySyncScenario.StartScenarioRequest(playerId, ServerStartGameTime.Ticks);
                         }
                     }
@@ -307,7 +307,8 @@ namespace Sandbox.Game.GameSystems
             }
             GameState = MyState.Running;
             m_startBattleTime = MySession.Static.ElapsedPlayTime;
-            MyPlayerCollection.RequestLocalRespawn();
+            if (MySession.Static.LocalHumanPlayer == null || MySession.Static.LocalHumanPlayer.Character == null)
+                MyPlayerCollection.RequestLocalRespawn();
         }
 
         internal static MyOnlineModeEnum GetOnlineModeFromCurrentLobbyType()
@@ -371,7 +372,7 @@ namespace Sandbox.Game.GameSystems
                 {
                     MyGuiSandbox.AddScreen(MyGuiSandbox.CreateMessageBox(
                                 messageText: MyTexts.Get(MySpaceTexts.MessageBoxTextWorkshopDownloadFailed),
-                                messageCaption: MyTexts.Get(MySpaceTexts.ScreenCaptionWorkshop)));
+                                messageCaption: MyTexts.Get(MyCommonTexts.ScreenCaptionWorkshop)));
                 }
                 else
                 {
@@ -395,7 +396,7 @@ namespace Sandbox.Game.GameSystems
                         {
                             MyGuiSandbox.AddScreen(MyGuiSandbox.CreateMessageBox(
                                     messageText: MyTexts.Get(MySpaceTexts.MessageBoxTextWorkshopDownloadFailed),
-                                    messageCaption: MyTexts.Get(MySpaceTexts.ScreenCaptionWorkshop)));
+                                    messageCaption: MyTexts.Get(MyCommonTexts.ScreenCaptionWorkshop)));
                         }
                     };
                     MySteam.API.RemoteStorage.GetPublishedFileDetails(workshopID, 0, onGetDetailsCallResult);
@@ -421,7 +422,7 @@ namespace Sandbox.Game.GameSystems
                 //fail msg:
                 StringBuilder error = new StringBuilder();
                 error.AppendFormat(MyTexts.GetString(MySpaceTexts.MessageBoxTextScenarioNotFound), contentDir, saveDir);
-                MyGuiScreenMessageBox mb = MyGuiSandbox.CreateMessageBox(messageText: error, messageCaption: MyTexts.Get(MySpaceTexts.MessageBoxCaptionError));
+                MyGuiScreenMessageBox mb = MyGuiSandbox.CreateMessageBox(messageText: error, messageCaption: MyTexts.Get(MyCommonTexts.MessageBoxCaptionError));
                 MyGuiSandbox.AddScreen(mb);
             }
         }
@@ -449,7 +450,7 @@ namespace Sandbox.Game.GameSystems
                 else
                     MyGuiSandbox.AddScreen(MyGuiSandbox.CreateMessageBox(
                                 messageText: MyTexts.Get(MySpaceTexts.MessageBoxTextWorkshopDownloadFailed),
-                                messageCaption: MyTexts.Get(MySpaceTexts.ScreenCaptionWorkshop)));
+                                messageCaption: MyTexts.Get(MyCommonTexts.ScreenCaptionWorkshop)));
             });
         }
 
@@ -462,8 +463,23 @@ namespace Sandbox.Game.GameSystems
         }
 
         private static CheckpointData? m_checkpointData;
+        private static void CheckDx11AndLoad(string sessionPath, bool multiplayer, MyOnlineModeEnum onlineMode, short maxPlayers,
+            MyGameModeEnum gameMode, MyObjectBuilder_Checkpoint checkpoint, ulong checkpointSizeInBytes)
+        {
+            bool needsDx11 = checkpoint.RequiresDX>=11;
+            if (!needsDx11 || MySandboxGame.IsDirectX11)
+            {
+                LoadMission(sessionPath, multiplayer, onlineMode, maxPlayers, gameMode, checkpoint, checkpointSizeInBytes);
+            }
+            else
+            {
+                MyJoinGameHelper.HandleDx11Needed();
+            }
+        }
 
-        public static void LoadMission(string sessionPath, bool multiplayer, MyOnlineModeEnum onlineMode, short maxPlayers)
+
+        public static void LoadMission(string sessionPath, bool multiplayer, MyOnlineModeEnum onlineMode, short maxPlayers,
+            MyGameModeEnum gameMode = MyGameModeEnum.Survival)
         {
             MyLog.Default.WriteLine("LoadSession() - Start");
             MyLog.Default.WriteLine(sessionPath);
@@ -471,20 +487,25 @@ namespace Sandbox.Game.GameSystems
             ulong checkpointSizeInBytes;
             var checkpoint = MyLocalCache.LoadCheckpoint(sessionPath, out checkpointSizeInBytes);
 
+            CheckDx11AndLoad(sessionPath, multiplayer, onlineMode, maxPlayers, gameMode, checkpoint, checkpointSizeInBytes);
+            }
+        public static void LoadMission(string sessionPath, bool multiplayer, MyOnlineModeEnum onlineMode, short maxPlayers,
+            MyGameModeEnum gameMode, MyObjectBuilder_Checkpoint checkpoint, ulong checkpointSizeInBytes)
+        {
             var persistentEditMode = checkpoint.Settings.ScenarioEditMode;
 
             checkpoint.Settings.OnlineMode = onlineMode;
             checkpoint.Settings.MaxPlayers = maxPlayers;
             checkpoint.Settings.Scenario = true;
-            checkpoint.Settings.GameMode = MyGameModeEnum.Survival;
+            checkpoint.Settings.GameMode = gameMode;
             checkpoint.Settings.ScenarioEditMode = false;
 
             if (!MySession.IsCompatibleVersion(checkpoint))
             {
-                MyLog.Default.WriteLine(MyTexts.Get(MySpaceTexts.DialogTextIncompatibleWorldVersion).ToString());
+                MyLog.Default.WriteLine(MyTexts.Get(MyCommonTexts.DialogTextIncompatibleWorldVersion).ToString());
                 MyGuiSandbox.AddScreen(MyGuiSandbox.CreateMessageBox(
-                    messageCaption: MyTexts.Get(MySpaceTexts.MessageBoxCaptionError),
-                    messageText: MyTexts.Get(MySpaceTexts.DialogTextIncompatibleWorldVersion),
+                    messageCaption: MyTexts.Get(MyCommonTexts.MessageBoxCaptionError),
+                    messageText: MyTexts.Get(MyCommonTexts.DialogTextIncompatibleWorldVersion),
                     buttonType: MyMessageBoxButtonsType.OK));
                 MyLog.Default.WriteLine("LoadSession() - End");
                 return;
@@ -492,10 +513,10 @@ namespace Sandbox.Game.GameSystems
 
             if (!MySteamWorkshop.CheckLocalModsAllowed(checkpoint.Mods, checkpoint.Settings.OnlineMode == MyOnlineModeEnum.OFFLINE))
             {
-                MyLog.Default.WriteLine(MyTexts.Get(MySpaceTexts.DialogTextLocalModsDisabledInMultiplayer).ToString());
+                MyLog.Default.WriteLine(MyTexts.Get(MyCommonTexts.DialogTextLocalModsDisabledInMultiplayer).ToString());
                 MyGuiSandbox.AddScreen(MyGuiSandbox.CreateMessageBox(
-                    messageCaption: MyTexts.Get(MySpaceTexts.MessageBoxCaptionError),
-                    messageText: MyTexts.Get(MySpaceTexts.DialogTextLocalModsDisabledInMultiplayer),
+                    messageCaption: MyTexts.Get(MyCommonTexts.MessageBoxCaptionError),
+                    messageText: MyTexts.Get(MyCommonTexts.DialogTextLocalModsDisabledInMultiplayer),
                     buttonType: MyMessageBoxButtonsType.OK));
                 MyLog.Default.WriteLine("LoadSession() - End");
                 return;
@@ -535,42 +556,46 @@ namespace Sandbox.Game.GameSystems
             LoadMission(checkpointData);
         }
 
+
         private static void LoadMission(CheckpointData data)
         {
             var checkpoint = data.Checkpoint;
-            MySteamWorkshop.DownloadModsAsync(checkpoint.Mods, delegate(bool success)
+            MySteamWorkshop.DownloadModsAsync(checkpoint.Mods, delegate(bool success,string mismatchMods)
             {
                 if (success || (checkpoint.Settings.OnlineMode == MyOnlineModeEnum.OFFLINE) && MySteamWorkshop.CanRunOffline(checkpoint.Mods))
                 {
                     //Sandbox.Audio.MyAudio.Static.Mute = true;
 
                     MyScreenManager.CloseAllScreensNowExcept(null);
-                    MyGuiSandbox.Update(MyEngineConstants.UPDATE_STEP_SIZE_IN_MILLISECONDS);
+                    MyGuiSandbox.Update(VRage.Game.MyEngineConstants.UPDATE_STEP_SIZE_IN_MILLISECONDS);
 
-                    // May be called from gameplay, so we must make sure we unload the current game
-                    if (MySession.Static != null)
+                    MyGuiScreenLoadSandbox.CheckMismatchmods(mismatchMods, callback: delegate(VRage.Game.ModAPI.ResultEnum val)
                     {
-                        MySession.Static.Unload();
-                        MySession.Static = null;
-                    }
+                        // May be called from gameplay, so we must make sure we unload the current game
+                        if (MySession.Static != null)
+                        {
+                            MySession.Static.Unload();
+                            MySession.Static = null;
+                        }
 
-                    //seed 0 has special meaning - please randomize at mission start. New seed will be saved and game will run with it ever since.
-                    //  if you use this, YOU CANNOT HAVE ANY PROCEDURAL ASTEROIDS ALREADY SAVED
-                    if (checkpoint.Settings.ProceduralSeed == 0)
-                        checkpoint.Settings.ProceduralSeed = MyRandom.Instance.Next();
+                        //seed 0 has special meaning - please randomize at mission start. New seed will be saved and game will run with it ever since.
+                        //  if you use this, YOU CANNOT HAVE ANY PROCEDURAL ASTEROIDS ALREADY SAVED
+                        if (checkpoint.Settings.ProceduralSeed == 0)
+                            checkpoint.Settings.ProceduralSeed = MyRandom.Instance.Next();
 
-                    MyGuiScreenGamePlay.StartLoading(delegate
-                    {
-                        checkpoint.Settings.Scenario = true;
-                        MySession.LoadMission(data.SessionPath, checkpoint, data.CheckpointSize, data.PersistentEditMode);
+                        MyGuiScreenGamePlay.StartLoading(delegate
+                        {
+                            checkpoint.Settings.Scenario = true;
+                            MySession.LoadMission(data.SessionPath, checkpoint, data.CheckpointSize, data.PersistentEditMode);
+                        });
                     });
                 }
                 else
                 {
-                    MyLog.Default.WriteLine(MyTexts.Get(MySpaceTexts.DialogTextDownloadModsFailed).ToString());
+                    MyLog.Default.WriteLine(MyTexts.Get(MyCommonTexts.DialogTextDownloadModsFailed).ToString());
                     MyGuiSandbox.AddScreen(MyGuiSandbox.CreateMessageBox(
-                        messageCaption: MyTexts.Get(MySpaceTexts.MessageBoxCaptionError),
-                        messageText: MyTexts.Get(MySpaceTexts.DialogTextDownloadModsFailed),
+                        messageCaption: MyTexts.Get(MyCommonTexts.MessageBoxCaptionError),
+                        messageText: MyTexts.Get(MyCommonTexts.DialogTextDownloadModsFailed),
                         buttonType: MyMessageBoxButtonsType.OK, callback: delegate(MyGuiScreenMessageBox.ResultEnum result)
                         {
                             if (MyFakes.QUICK_LAUNCH != null)

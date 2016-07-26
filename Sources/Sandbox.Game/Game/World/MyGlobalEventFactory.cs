@@ -6,12 +6,14 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Reflection;
 using Sandbox.Common;
+using VRage.Game;
 using VRage.Plugins;
 using VRage.ObjectBuilders;
+using VRage.Game.Common;
 
 namespace Sandbox.Game.World
 {
-    public delegate void GlobalEventHandler(object sender);
+    //public delegate void GlobalEventHandler(MyGlobalEventBase sender);
 
     [AttributeUsage(AttributeTargets.Method, AllowMultiple = true)]
     [Obfuscation(Feature = Obfuscator.NoRename, Exclude = true)]
@@ -33,12 +35,13 @@ namespace Sandbox.Game.World
 
     public class MyGlobalEventFactory
     {
-        static readonly Dictionary<MyDefinitionId, GlobalEventHandler> m_typesToHandlers;
+        //static readonly Dictionary<MyDefinitionId, GlobalEventHandler> m_typesToHandlers;
+		static readonly Dictionary<MyDefinitionId, MethodInfo> m_typesToHandlers;
         static MyObjectFactory<MyEventTypeAttribute, MyGlobalEventBase> m_globalEventFactory;
 
         static MyGlobalEventFactory()
         {
-            m_typesToHandlers = new Dictionary<MyDefinitionId, GlobalEventHandler>();
+			m_typesToHandlers = new Dictionary<MyDefinitionId, MethodInfo>();
             m_globalEventFactory = new MyObjectFactory<MyEventTypeAttribute, MyGlobalEventBase>();
 
             RegisterEventTypesAndHandlers(Assembly.GetAssembly(typeof(MyGlobalEventBase)));
@@ -63,7 +66,7 @@ namespace Sandbox.Game.World
                         {
                             MyGlobalEventHandler typedDescriptor = (MyGlobalEventHandler)descriptor;
 
-                            RegisterHandler(typedDescriptor.EventDefinitionId, MethodInfoExtensions.CreateDelegate<GlobalEventHandler>(method));
+                            RegisterHandler(typedDescriptor.EventDefinitionId, method);
                         }
                     }
                 }
@@ -72,16 +75,16 @@ namespace Sandbox.Game.World
             m_globalEventFactory.RegisterFromAssembly(assembly);
         }
 
-        private static void RegisterHandler(MyDefinitionId eventDefinitionId, GlobalEventHandler handler)
+        private static void RegisterHandler(MyDefinitionId eventDefinitionId, MethodInfo handler)
         {
             Debug.Assert(!m_typesToHandlers.ContainsKey(eventDefinitionId), "One event definition id can only have one event handler!");
 
             m_typesToHandlers[eventDefinitionId] = handler;
         }
 
-        public static GlobalEventHandler GetEventHandler(MyDefinitionId eventDefinitionId)
+        public static MethodInfo GetEventHandler(MyDefinitionId eventDefinitionId)
         {
-            GlobalEventHandler handler = null;
+            MethodInfo handler = null;
             m_typesToHandlers.TryGetValue(eventDefinitionId, out handler);
             return handler;
         }

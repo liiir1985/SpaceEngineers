@@ -20,6 +20,11 @@ using Sandbox.Engine.Physics;
 using Havok;
 using VRage.Library.Utils;
 using VRage.FileSystem;
+using Sandbox.Game.World;
+using VRage.Game;
+using VRage.Game.Definitions.Animation;
+using VRage.Game.Entity;
+using Sandbox.Game.Multiplayer;
 
 
 #endregion
@@ -39,100 +44,102 @@ namespace Sandbox.Game.Entities.Character
         #region Animations init
 
 
+        // temporary solution, resolving jittering
+        private readonly Vector3[] m_animationSpeedFilter = new Vector3[4];
+        private int m_animationSpeedFilterCursor = 0;
+
         void InitAnimations()
         {
-            Debug.Assert(TestCharacterBoneDefinitions(), "Warning! Bone definitions in model " + this.ModelName + " are incorrect.");
-            
+            m_animationSpeedFilterCursor = 0;
+            for (int i = 0; i < m_animationSpeedFilter.Length; i++)
+                m_animationSpeedFilter[i] = Vector3.Zero;
+
             foreach (var bones in m_characterDefinition.BoneSets)
             {
                 AddAnimationPlayer(bones.Key, bones.Value);
             }
 
-            FindBone(m_characterDefinition.HeadBone, out m_headBoneIndex);
-            FindBone(m_characterDefinition.Camera3rdBone, out m_camera3rdBoneIndex);
+            SetBoneLODs(m_characterDefinition.BoneLODs);
+
+            AnimationController.FindBone(m_characterDefinition.HeadBone, out m_headBoneIndex);
+            AnimationController.FindBone(m_characterDefinition.Camera3rdBone, out m_camera3rdBoneIndex);
             if (m_camera3rdBoneIndex == -1)
-                m_camera3rdBoneIndex = m_headBoneIndex;            
-            FindBone(m_characterDefinition.LeftHandIKStartBone, out m_leftHandIKStartBone);
-            FindBone(m_characterDefinition.LeftHandIKEndBone, out m_leftHandIKEndBone);
-            FindBone(m_characterDefinition.RightHandIKStartBone, out m_rightHandIKStartBone);
-            FindBone(m_characterDefinition.RightHandIKEndBone, out m_rightHandIKEndBone);
+                m_camera3rdBoneIndex = m_headBoneIndex;
+            AnimationController.FindBone(m_characterDefinition.LeftHandIKStartBone, out m_leftHandIKStartBone);
+            AnimationController.FindBone(m_characterDefinition.LeftHandIKEndBone, out m_leftHandIKEndBone);
+            AnimationController.FindBone(m_characterDefinition.RightHandIKStartBone, out m_rightHandIKStartBone);
+            AnimationController.FindBone(m_characterDefinition.RightHandIKEndBone, out m_rightHandIKEndBone);
 
-            FindBone(m_characterDefinition.LeftUpperarmBone, out m_leftUpperarmBone);
-            FindBone(m_characterDefinition.LeftForearmBone, out m_leftForearmBone);
-            FindBone(m_characterDefinition.RightUpperarmBone, out m_rightUpperarmBone);
-            FindBone(m_characterDefinition.RightForearmBone, out m_rightForearmBone);
+            AnimationController.FindBone(m_characterDefinition.LeftUpperarmBone, out m_leftUpperarmBone);
+            AnimationController.FindBone(m_characterDefinition.LeftForearmBone, out m_leftForearmBone);
+            AnimationController.FindBone(m_characterDefinition.RightUpperarmBone, out m_rightUpperarmBone);
+            AnimationController.FindBone(m_characterDefinition.RightForearmBone, out m_rightForearmBone);
 
-            FindBone(m_characterDefinition.WeaponBone, out m_weaponBone);
-            FindBone(m_characterDefinition.LeftHandItemBone, out m_leftHandItemBone);
-            FindBone(m_characterDefinition.RighHandItemBone, out m_rightHandItemBone);
-            FindBone(m_characterDefinition.SpineBone, out m_spineBone);
-
-            FindBone(m_characterDefinition.ModelRootBoneName, out m_rootBone);
-            FindBone(m_characterDefinition.LeftHipBoneName, out m_leftHipBone);
-            FindBone(m_characterDefinition.LeftKneeBoneName, out m_leftKneeBone);
-            FindBone(m_characterDefinition.LeftAnkleBoneName, out m_leftAnkleBone);
-            FindBone(m_characterDefinition.RightHipBoneName, out m_rightHipBone);
-            FindBone(m_characterDefinition.RightKneeBoneName, out m_rightKneeBone);
-            FindBone(m_characterDefinition.RightAnkleBoneName, out m_rightAnkleBone);           
-
-  
-            UpdateAnimation();
+            AnimationController.FindBone(m_characterDefinition.WeaponBone, out m_weaponBone);
+            AnimationController.FindBone(m_characterDefinition.LeftHandItemBone, out m_leftHandItemBone);
+            AnimationController.FindBone(m_characterDefinition.RighHandItemBone, out m_rightHandItemBone);
+            AnimationController.FindBone(m_characterDefinition.SpineBone, out m_spineBone);
+            
+            UpdateAnimation(0);
         }
 
 
-        // FOR DEBUG ONLY - TEST THE LOADED DEFINITIONS OF BONES
-        private bool TestCharacterBoneDefinitions()
+        public override void UpdateToolPosition()
         {
-           bool isOk = true;
-            // Test only mandatory bones - add if needed
-           if (m_characterDefinition.HeadBone == null)
-           {
-               Debug.Fail("Warning! Headbone definition is missing! Model: " + this.ModelName);
-               isOk = false;                
-           }
-           //if (m_characterDefinition.ModelRootBoneName == null)
-           //{
-           //    Debug.Fail("Warning! Rootbone definition is missing! Model: " + this.ModelName);
-           //    isOk = false;
-           //}
-           if (m_characterDefinition.SpineBone == null)
-           {
-               Debug.Fail("Warning! Spine bone definition is missing! Model: " + this.ModelName);
-               isOk = false;
-           }
-           return isOk;
-        }
+            //if (m_currentWeapon != null)
+            //{
+            //    if (!MyPerGameSettings.CheckUseAnimationInsteadOfIK(m_currentWeapon))
+            //    {
+            //        UpdateWeaponPosition();
+            //    }
+            //}
+                }
 
-
-
-        protected override void CalculateTransforms()
+        protected override void CalculateTransforms(float distance)
         {
             ProfilerShort.Begin("MyCharacter.CalculateTransforms");
 
-            base.CalculateTransforms();
+            base.CalculateTransforms(distance);
+            if (m_headBoneIndex >= 0 && AnimationController.CharacterBones != null && (IsInFirstPersonView || ForceFirstPersonCamera) && ControllerInfo.IsLocallyControlled() && !IsBot)
+            {
+                Vector3 headHorizontalTranslation = AnimationController.CharacterBones[m_headBoneIndex].AbsoluteTransform.Translation;
+                headHorizontalTranslation.Y = 0;
+                MyCharacterBone.TranslateAllBones(AnimationController.CharacterBones, -headHorizontalTranslation);
+            }
 
-            VRageRender.MyRenderProxy.GetRenderProfiler().StartProfilingBlock("UpdateLeftHandItemPosition");
+            VRageRender.MyRenderProxy.GetRenderProfiler().StartProfilingBlock("Calculate Hand IK");
+
+
+            if (this == MySession.Static.ControlledEntity)
+            {
+                // (OM) Note: only controlled character can get it's aimed point from camera, otherwise all character's will aim the same direction
+                // set the aimed point explicitly using AimedPoint property
+                m_aimedPoint = GetAimedPointFromCamera();
+            }
+
+            VRageRender.MyRenderProxy.GetRenderProfiler().StartNextBlock("Update anim IK");
+
+            AnimationController.UpdateInverseKinematics(); // since we already have absolute transforms
+
+            VRageRender.MyRenderProxy.GetRenderProfiler().StartNextBlock("UpdateLeftHandItemPosition");
             if (m_leftHandItem != null)
             {
                 UpdateLeftHandItemPosition();
             }
 
-            VRageRender.MyRenderProxy.GetRenderProfiler().StartNextBlock("Calculate Hand IK");
-
-            m_aimedPoint = GetAimedPointFromCamera();
-
-            if (m_currentWeapon != null)
+            if (m_currentWeapon != null && WeaponPosition != null)
             {
-                if (!MyPerGameSettings.UseAnimationInsteadOfIK)
+                if (!MyPerGameSettings.CheckUseAnimationInsteadOfIK(m_currentWeapon))
                 {
-                    UpdateWeaponPosition(); //mainly IK and some zoom + ironsight stuff
-                    if (m_handItemDefinition.SimulateLeftHand && m_leftHandIKStartBone != -1 && m_leftHandIKEndBone != -1 && (!UseAnimationForWeapon && m_animationToIKState == 0))
+                    WeaponPosition.Update();
+                    //mainly IK and some zoom + ironsight stuff
+                    if (m_handItemDefinition.SimulateLeftHand && m_leftHandIKStartBone != -1 && m_leftHandIKEndBone != -1 && (!UseAnimationForWeapon))
                     {
                         MatrixD leftHand = (MatrixD)m_handItemDefinition.LeftHand * ((MyEntity)m_currentWeapon).WorldMatrix;
                         CalculateHandIK(m_leftHandIKStartBone, m_leftForearmBone, m_leftHandIKEndBone, ref leftHand);
                     }
 
-                    if (m_handItemDefinition.SimulateRightHand && m_rightHandIKStartBone != -1 && m_rightHandIKEndBone != -1 && (!UseAnimationForWeapon || m_animationToIKState != 0))
+                    if (m_handItemDefinition.SimulateRightHand && m_rightHandIKStartBone != -1 && m_rightHandIKEndBone != -1 && (!UseAnimationForWeapon) && IsSitting == false)
                     {
                         MatrixD rightHand = (MatrixD)m_handItemDefinition.RightHand * ((MyEntity)m_currentWeapon).WorldMatrix;
                         CalculateHandIK(m_rightHandIKStartBone, m_rightForearmBone, m_rightHandIKEndBone, ref rightHand);
@@ -140,28 +147,39 @@ namespace Sandbox.Game.Entities.Character
                 }
                 else
                 {
+                    GetHeadMatrix(true); // CH: REMOVE ME! I'M A TERRIBLE HACK!
                     Debug.Assert(m_rightHandItemBone != -1, "Invalid bone for weapon.");
                     if (m_rightHandItemBone != -1)
                     {
                         //use animation for right hand item
-                        MatrixD rightHandItemMatrix = Bones[m_rightHandItemBone].AbsoluteTransform * WorldMatrix;
-                        //var rightHandItemMatrix = ((MyEntity)m_currentWeapon).PositionComp.WorldMatrix; //use with UpdateWeaponPosition() but not working for barbarians
-                        Vector3D up = rightHandItemMatrix.Up;
-                        rightHandItemMatrix.Up = rightHandItemMatrix.Forward;
-                        rightHandItemMatrix.Forward = up;
-                        rightHandItemMatrix.Right = -rightHandItemMatrix.Right;
-                        ((MyEntity)m_currentWeapon).PositionComp.WorldMatrix = rightHandItemMatrix;
+                        MyCharacterBone boneRightHand = AnimationController.CharacterBones[m_rightHandItemBone];
+                        ((MyEntity)m_currentWeapon).PositionComp.WorldMatrix = boneRightHand.AbsoluteTransform * PositionComp.WorldMatrix;
+
+                        if (MyDebugDrawSettings.ENABLE_DEBUG_DRAW)
+                        {
+                            MyRenderProxy.DebugDrawAxis(((MyEntity)m_currentWeapon).PositionComp.WorldMatrix, 0.5f, false);
+                        }
                     }
                 }
+            }
+            else
+            {
+                if (WeaponPosition != null)
+                    WeaponPosition.UpdateIkTransitions();
+                GetHeadMatrix(true); // CH: REMOVE ME! I'M A TERRIBLE HACK!
             }
 
 
             VRageRender.MyRenderProxy.GetRenderProfiler().StartNextBlock("ComputeBoneTransform");
 
-            for (int i = 0; i < Bones.Count; i++)
+            var characterBones = AnimationController.CharacterBones;
+            if (characterBones == null)
+                return;
+            for (int i = 0; i < characterBones.Length; i++)
             {
-                MyCharacterBone bone = Bones[i];
-                BoneRelativeTransforms[i] = bone.ComputeBoneTransform();
+                MyCharacterBone bone = characterBones[i];
+                bone.ComputeBoneTransform();
+                BoneRelativeTransforms[i] = bone.RelativeTransform;
             }
 
             VRageRender.MyRenderProxy.GetRenderProfiler().EndProfilingBlock();
@@ -175,19 +193,24 @@ namespace Sandbox.Game.Entities.Character
 
         #region Animations update
 
-        public override void UpdateAnimation()
+        public override void UpdateAnimation(float distance)
         {
+            if (UseNewAnimationSystem)
+                UpdateAnimationNewSystem();
+            if (MySandboxGame.IsDedicated && MyPerGameSettings.DisableAnimationsOnDS)
+                return;
             MyAnimationPlayerBlendPair leftHandPlayer;
             if (TryGetAnimationPlayer("LeftHand", out leftHandPlayer))
             {
-                if (leftHandPlayer.GetState() == MyAnimationPlayerBlendPair.AnimationBlendState.Stopped && m_leftHandItem != null)
+                if (leftHandPlayer.GetState() == MyAnimationPlayerBlendPair.AnimationBlendState.Stopped 
+                    && m_leftHandItem != null && !UseNewAnimationSystem)
                 {
                     m_leftHandItem.Close();
                     m_leftHandItem = null;
                 }
             }
 
-            base.UpdateAnimation();
+            base.UpdateAnimation(distance);
 
             Render.UpdateThrustMatrices(BoneAbsoluteTransforms);
 
@@ -203,46 +226,126 @@ namespace Sandbox.Game.Entities.Character
             }
         }
 
+        private void UpdateAnimationNewSystem()
+        {
+            var variableStorage = AnimationController.Variables;
+            // character speed
+            if (Physics != null && Physics.CharacterProxy != null)
+            {
+                Vector3 localSpeedWorldRotUnfiltered = (Physics.CharacterProxy.LinearVelocity - Physics.CharacterProxy.CharacterRigidBody.GroundVelocity) / Sync.RelativeSimulationRatio;
+                var localSpeedWorldRot = FilterLocalSpeed(localSpeedWorldRotUnfiltered);
+                variableStorage.SetValue(MyAnimationVariableStorageHints.StrIdSpeed, localSpeedWorldRot.Length());
+                float localSpeedX = localSpeedWorldRot.Dot(PositionComp.WorldMatrix.Right);
+                float localSpeedY = localSpeedWorldRot.Dot(PositionComp.WorldMatrix.Up);
+                float localSpeedZ = localSpeedWorldRot.Dot(PositionComp.WorldMatrix.Forward);
+                variableStorage.SetValue(MyAnimationVariableStorageHints.StrIdSpeedX, localSpeedX);
+                variableStorage.SetValue(MyAnimationVariableStorageHints.StrIdSpeedY, localSpeedY);
+                variableStorage.SetValue(MyAnimationVariableStorageHints.StrIdSpeedZ, localSpeedZ);
+                const float speedThreshold2 = 0.1f * 0.1f;
+                float speedangle = localSpeedWorldRot.LengthSquared() > speedThreshold2 ? (float)(-Math.Atan2(localSpeedZ, localSpeedX) * 180.0f / Math.PI) + 90.0f : 0.0f;
+                while (speedangle < 0.0f)
+                    speedangle += 360.0f;
+                variableStorage.SetValue(MyAnimationVariableStorageHints.StrIdSpeedAngle, speedangle);
+
+                if (ControllerInfo.IsLocallyControlled())
+                    m_animTurningSpeed.Value = RotationIndicator.Y * 180.0f / (float)Math.PI;
+                variableStorage.SetValue(MyAnimationVariableStorageHints.StrIdTurningSpeed, m_animTurningSpeed);
+
+                if (OxygenComponent != null)
+                    variableStorage.SetValue(MyAnimationVariableStorageHints.StrIdHelmetOpen, OxygenComponent.HelmetEnabled ? 0.0f : 1.0f);
+
+                if (Parent is MyCockpit)
+                    variableStorage.SetValue(MyAnimationVariableStorageHints.StrIdLean, 0);
+                else
+                    variableStorage.SetValue(MyAnimationVariableStorageHints.StrIdLean, m_animLeaning);
+            }
+
+            if (JetpackComp != null)
+                AnimationController.Variables.SetValue(MyAnimationVariableStorageHints.StrIdFlying, JetpackComp.Running ? 1.0f : 0.0f);
+
+            AnimationController.Variables.SetValue(MyAnimationVariableStorageHints.StrIdFalling, GetCurrentMovementState() == MyCharacterMovementEnum.Falling ? 1.0f : 0.0f);
+            MyCharacterMovementEnum movementState = GetCurrentMovementState();
+            variableStorage.SetValue(MyAnimationVariableStorageHints.StrIdFlying, movementState == MyCharacterMovementEnum.Flying ? 1.0f : 0.0f);
+            variableStorage.SetValue(MyAnimationVariableStorageHints.StrIdFalling, m_isFalling || movementState == MyCharacterMovementEnum.Falling ? 1.0f : 0.0f);
+            variableStorage.SetValue(MyAnimationVariableStorageHints.StrIdCrouch, (WantsCrouch && !WantsSprint) ? 1.0f : 0.0f);
+            variableStorage.SetValue(MyAnimationVariableStorageHints.StrIdSitting, movementState == MyCharacterMovementEnum.Sitting ? 1.0f : 0.0f);
+            variableStorage.SetValue(MyAnimationVariableStorageHints.StrIdJumping, movementState == MyCharacterMovementEnum.Jump ? 1.0f : 0.0f);
+
+            variableStorage.SetValue(MyAnimationVariableStorageHints.StrIdFirstPerson, m_isInFirstPerson ? 1.0f : 0.0f);
+            variableStorage.SetValue(MyAnimationVariableStorageHints.StrIdHoldingTool, m_currentWeapon != null ? 1.0f : 0.0f);
+        }
+
+        private Vector3 FilterLocalSpeed(Vector3 localSpeedWorldRotUnfiltered)
+        {
+            m_animationSpeedFilter[m_animationSpeedFilterCursor++] = localSpeedWorldRotUnfiltered;
+            if (m_animationSpeedFilterCursor >= m_animationSpeedFilter.Length)
+                m_animationSpeedFilterCursor = 0;
+
+            Vector3 localSpeedWorldRot = Vector3.Zero;
+            for (int i = 0; i < m_animationSpeedFilter.Length; i++)
+            {
+                if (m_animationSpeedFilter[i].X*m_animationSpeedFilter[i].X > localSpeedWorldRot.X*localSpeedWorldRot.X)
+                    localSpeedWorldRot.X = m_animationSpeedFilter[i].X;
+                if (m_animationSpeedFilter[i].Y*m_animationSpeedFilter[i].Y > localSpeedWorldRot.Y*localSpeedWorldRot.Y)
+                    localSpeedWorldRot.Y = m_animationSpeedFilter[i].Y;
+                if (m_animationSpeedFilter[i].Z*m_animationSpeedFilter[i].Z > localSpeedWorldRot.Z*localSpeedWorldRot.Z)
+                    localSpeedWorldRot.Z = m_animationSpeedFilter[i].Z;
+            }
+            return localSpeedWorldRot;
+        }
+
+        /*
+         * This was hacked so the character would have a fluid movement (when shooting still and then start another movement - jump, strafe, running, etc...).
+         * Before this, the attack animation would be overriden, but still with normal physical/damage effects.
+         */
+        MyStringHash medievelMaleSubtypeId = MyStringHash.GetOrCompute("Medieval_male");
+        string m_lastBonesArea = string.Empty;
         protected override void OnAnimationPlay(MyAnimationDefinition animDefinition,MyAnimationCommand command, ref string bonesArea, ref MyFrameOption frameOption, ref bool useFirstPersonVersion)
         {
-            if (GetCurrentMovementState() != MyCharacterMovementEnum.Standing &&
-                    GetCurrentMovementState() != MyCharacterMovementEnum.RotatingLeft &&
-                    GetCurrentMovementState() != MyCharacterMovementEnum.RotatingRight &&
-                     command.ExcludeLegsWhenMoving)
-                            {
-                                //In this case, we must stop all upper animations correctly
-                                bonesArea = TopBody;
-                                frameOption = MyFrameOption.None;
-                            }
+            var currentMovementState = GetCurrentMovementState();
 
+            if (DefinitionId.Value.SubtypeId == medievelMaleSubtypeId)
+            {
+                if (command.ExcludeLegsWhenMoving)
+                {
+                    //In this case, we must stop all upper animations correctly
+
+                    if (currentMovementState == MyCharacterMovementEnum.RotatingLeft ||
+                        currentMovementState == MyCharacterMovementEnum.RotatingRight ||
+                        currentMovementState == MyCharacterMovementEnum.Standing)
+                        bonesArea = TopBody + " LowerBody";
+                    else
+                        bonesArea = TopBody;
+                    frameOption = frameOption != MyFrameOption.JustFirstFrame ? MyFrameOption.PlayOnce : frameOption;
+                }
+                else if (m_lastBonesArea == TopBody + " LowerBody")
+                    StopLowerCharacterAnimation(0.2f);
+
+                m_lastBonesArea = bonesArea;
+            }
+            else
+            {
+                if (currentMovementState != MyCharacterMovementEnum.Standing &&
+                    currentMovementState != MyCharacterMovementEnum.RotatingLeft &&
+                    currentMovementState != MyCharacterMovementEnum.RotatingRight &&
+                     command.ExcludeLegsWhenMoving)
+                {
+                    //In this case, we must stop all upper animations correctly
+                    bonesArea = TopBody;
+                    frameOption = frameOption != MyFrameOption.JustFirstFrame ? MyFrameOption.PlayOnce : frameOption;
+                }
+            }
+
+            
             useFirstPersonVersion = IsInFirstPersonView;
 
             if (animDefinition.AllowWithWeapon)
             {
                 if (!UseAnimationForWeapon)
                 {
-                    StoreWeaponRelativeMatrix();
                     UseAnimationForWeapon = true;
                     m_resetWeaponAnimationState = true;
                 }
-            }
-
-            if (!animDefinition.LeftHandItem.TypeId.IsNull)
-            {
-                if (m_leftHandItem != null)
-                {
-                    (m_leftHandItem as IMyHandheldGunObject<Sandbox.Game.Weapons.MyDeviceBase>).OnControlReleased();
-                    m_leftHandItem.Close();
-                }
-
-                m_leftHandItem = MyEntityFactory.CreateEntity(animDefinition.LeftHandItem.TypeId);
-                var ob = MyEntityFactory.CreateObjectBuilder(m_leftHandItem);
-                m_leftHandItem.Init(ob);
-
-                (m_leftHandItem as IMyHandheldGunObject<Sandbox.Game.Weapons.MyDeviceBase>).OnControlAcquired(this);
-                UpdateLeftHandItemPosition();
-
-                MyEntities.Add(m_leftHandItem);
             }
         }
 
@@ -263,10 +366,15 @@ namespace Sandbox.Game.Entities.Character
 
         public override void AddCommand(MyAnimationCommand command, bool sync = false)
         {
+            if (UseNewAnimationSystem)
+                return;
+
             base.AddCommand(command, sync);
 
             if (sync)
-                SyncObject.SendAnimationCommand(ref command);
+            {
+                SendAnimationCommand(ref command);
+            }
         }
 
 
@@ -278,12 +386,6 @@ namespace Sandbox.Game.Entities.Character
                 if (valueChanged)
                 {
                     m_additionalRotations[Definition.SpineBone] = rotation;
-
-                    if (updateSync)
-                    {
-                        SyncObject.ChangeHeadOrSpine(m_headLocalXAngle, m_headLocalYAngle,
-                            rotationForClients, GetAdditionalRotation(Definition.HeadBone), GetAdditionalRotation(Definition.LeftForearmBone), GetAdditionalRotation(Definition.LeftUpperarmBone));
-                    }
                 }
             }
         }
@@ -297,12 +399,6 @@ namespace Sandbox.Game.Entities.Character
                 if (valueChanged)
                 {
                     m_additionalRotations[Definition.HeadBone] = rotation;
-
-                    if (updateSync)
-                    {
-                        SyncObject.ChangeHeadOrSpine(m_headLocalXAngle, m_headLocalYAngle,
-                            GetAdditionalRotation(Definition.SpineBone), rotation, GetAdditionalRotation(Definition.LeftForearmBone), GetAdditionalRotation(Definition.LeftUpperarmBone));
-                    }
                 }
             }
         }
@@ -316,12 +412,6 @@ namespace Sandbox.Game.Entities.Character
                 {
                     m_additionalRotations[Definition.LeftForearmBone] = rotation;
                     m_additionalRotations[Definition.RightForearmBone] = Quaternion.Inverse(rotation);
-
-                    if (updateSync)
-                    {
-                        SyncObject.ChangeHeadOrSpine(m_headLocalXAngle, m_headLocalYAngle,
-                           GetAdditionalRotation(Definition.SpineBone), GetAdditionalRotation(Definition.HeadBone), rotation, GetAdditionalRotation(Definition.LeftUpperarmBone));
-                    }
                 }
             }
         }
@@ -335,12 +425,6 @@ namespace Sandbox.Game.Entities.Character
                 {
                     m_additionalRotations[Definition.LeftUpperarmBone] = rotation;
                     m_additionalRotations[Definition.RightUpperarmBone] = Quaternion.Inverse(rotation);
-
-                    if (updateSync)
-                    {
-                        SyncObject.ChangeHeadOrSpine(m_headLocalXAngle, m_headLocalYAngle,
-                           GetAdditionalRotation(Definition.SpineBone), GetAdditionalRotation(Definition.HeadBone), GetAdditionalRotation(Definition.LeftForearmBone), rotation);
-                    }
                 }
             }
         }
@@ -355,6 +439,31 @@ namespace Sandbox.Game.Entities.Character
 
         #region Animation commands
 
+        public void DisableAnimationCommands()
+        {
+            m_animationCommandsEnabled = false;
+        }
+
+        public void EnableAnimationCommands()
+        {
+            m_animationCommandsEnabled = true;
+        }
+
+        public void TriggerCharacterAnimationEvent(string eventName, bool sync)
+        {
+            if (!UseNewAnimationSystem || string.IsNullOrEmpty(eventName))
+                return;
+
+            if (sync)
+            {
+                SendAnimationEvent(eventName);
+            }
+            else
+            {
+                AnimationController.TriggerAction(MyStringId.GetOrCompute(eventName));
+            }
+        }
+
         public void PlayCharacterAnimation(
            string animationName,
            MyBlendOption blendOption,
@@ -366,6 +475,16 @@ namespace Sandbox.Game.Entities.Character
            bool excludeLegsWhenMoving = false
            )
         {
+            if (UseNewAnimationSystem)
+                return;
+            bool disableAnimations = MySandboxGame.IsDedicated && MyPerGameSettings.DisableAnimationsOnDS;
+            if (disableAnimations && !sync)
+            {
+                return;
+            }
+
+            if (!m_animationCommandsEnabled) return;
+
             if (animationName == null)
             {
                 System.Diagnostics.Debug.Fail("Cannot play null animation!");
@@ -378,21 +497,36 @@ namespace Sandbox.Game.Entities.Character
                 animationSubtype = animationName;
             }
 
-            AddCommand(new MyAnimationCommand()
-                {
-                    AnimationSubtypeName = animationSubtype,
-                    PlaybackCommand = MyPlaybackCommand.Play,
-                    BlendOption = blendOption,
-                    FrameOption = frameOption,
-                    BlendTime = blendTime,
-                    TimeScale = timeScale,
-                    Area = influenceArea,
-                    ExcludeLegsWhenMoving = excludeLegsWhenMoving
-                }, sync);
+            var command = new MyAnimationCommand()
+            {
+                AnimationSubtypeName = animationSubtype,
+                PlaybackCommand = MyPlaybackCommand.Play,
+                BlendOption = blendOption,
+                FrameOption = frameOption,
+                BlendTime = blendTime,
+                TimeScale = timeScale,
+                Area = influenceArea,
+                ExcludeLegsWhenMoving = excludeLegsWhenMoving
+            };
+
+            // CH: If we don't want to play the animation ourselves, but it has to be synced, we have to send it to clients at least
+            // MZ: when sync is on, we always want to send the message
+            if (sync)
+            {
+                SendAnimationCommand(ref command);
+            }
+            else
+            {
+                // if animations are disabled and sync is off, don't do anything
+                if (!disableAnimations)
+                    AddCommand(command, sync);
+            }
         }
 
         public void StopUpperCharacterAnimation(float blendTime)
         {
+            if (UseNewAnimationSystem)
+                return;
             AddCommand(new MyAnimationCommand()
                 {
                     AnimationSubtypeName = null,
@@ -403,6 +537,19 @@ namespace Sandbox.Game.Entities.Character
                 });
         }
 
+        public void StopLowerCharacterAnimation(float blendTime)
+        {
+            if (UseNewAnimationSystem)
+                return;
+            AddCommand(new MyAnimationCommand()
+            {
+                AnimationSubtypeName = null,
+                PlaybackCommand = MyPlaybackCommand.Stop,
+                Area = "LowerBody",
+                BlendTime = blendTime,
+                TimeScale = 1
+            });
+        }
 
         #endregion
     }

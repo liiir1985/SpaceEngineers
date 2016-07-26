@@ -14,12 +14,20 @@ using VRageRender;
 using VRage.Library.Utils;
 using VRage.FileSystem;
 using VRage.ObjectBuilders;
-using VRage.Components;
+using VRage.Game.Components;
 using VRage.ModAPI;
 using VRage.Import;
 using Sandbox.Engine.Utils;
 using Sandbox.Definitions;
 using Sandbox.Game.Components;
+using Sandbox.Common.ObjectBuilders.Definitions;
+using Sandbox.Game.EntityComponents;
+using VRage.Animations;
+using VRage.Collections;
+using VRage.Game;
+using VRage.Game.Definitions.Animation;
+using VRage.Game.Entity;
+using VRage.Serialization;
 
 #endregion
 
@@ -29,14 +37,24 @@ namespace Sandbox.Game.Entities
 
     public struct MyAnimationCommand
     {
+        [Serialize(MyObjectFlags.Nullable)]
         public string AnimationSubtypeName;
         public MyPlaybackCommand PlaybackCommand;
         public MyBlendOption BlendOption;
         public MyFrameOption FrameOption;
+        [Serialize(MyObjectFlags.Nullable)]
         public string Area;
         public float BlendTime;
         public float TimeScale;
         public bool ExcludeLegsWhenMoving;
+        public bool KeepContinuingAnimations;
+    }
+
+    public struct MyAnimationSetData
+    {
+        public float BlendTime;
+        public string Area;
+        public AnimationSet AnimationSet;
     }
 
     #endregion
@@ -44,27 +62,39 @@ namespace Sandbox.Game.Entities
 
     public class MySkinnedEntity : MyEntity
     {
+        /// <summary>
+        /// VRAGE TODO: THIS IS TEMPORARY! Remove when by the time we use only the new animation system.
+        /// </summary>
+        public bool UseNewAnimationSystem = false;
+
+        private const int MAX_BONE_DECALS_COUNT = 4;
 
         #region Fields
 
-        private List<MyCharacterBone> m_bones = new List<MyCharacterBone>();
-        Matrix[] m_boneRelativeTransforms;
-        Matrix[] m_boneAbsoluteTransforms;
+        /// <summary>
+        /// Shortcut to animation controller component.
+        /// </summary>
+        private MyAnimationControllerComponent m_compAnimationController;
 
-        
-        public List<MyCharacterBone> Bones { get { return m_bones; } }
+        // moved to MyAnimationControllerComponent
 
-        public Matrix[] BoneAbsoluteTransforms { get { return m_boneAbsoluteTransforms; } } 
-        public Matrix[] BoneRelativeTransforms { get { return m_boneRelativeTransforms; } }
+        // private List<MyCharacterBone> m_bones = new List<MyCharacterBone>(); 
+        // Matrix[] m_boneRelativeTransforms;
+        // Matrix[] m_boneAbsoluteTransforms;
 
+        public MyAnimationControllerComponent AnimationController { get { return m_compAnimationController; } }        
+
+        public Matrix[] BoneAbsoluteTransforms { get { return m_compAnimationController.BoneAbsoluteTransforms; } }
+        public Matrix[] BoneRelativeTransforms { get { return m_compAnimationController.BoneRelativeTransforms; } }
+
+        static List<MyDecalPositionUpdate> m_decalUpdateCache = new List<MyDecalPositionUpdate>();
+        private Dictionary<int, List<MyDecalHitInfo>> m_boneDecals = new Dictionary<int, List<MyDecalHitInfo>>();
 
         protected ulong m_actualUpdateFrame = 0;
+		internal ulong ActualUpdateFrame { get { return m_actualUpdateFrame; } }
         protected ulong m_actualDrawFrame = 0;
-        protected bool m_characterBonesReady = false;
 
-        List<Matrix> m_simulatedBones = new List<Matrix>();
-
-        protected Dictionary<string, Quaternion> m_additionalRotations = new Dictionary<string, Quaternion>();
+        protected Dictionary<string, Quaternion> m_additionalRotations = new Dictionary<string, Quaternion>(); // should be moved to MyAnimationControllerComponent
 
         Dictionary<string, MyAnimationPlayerBlendPair> m_animationPlayers = new Dictionary<string, MyAnimationPlayerBlendPair>();
 
@@ -73,6 +103,7 @@ namespace Sandbox.Game.Entities
         BoundingBoxD m_actualWorldAABB;
         BoundingBoxD m_aabb;
 
+        List<MyAnimationSetData> m_continuingAnimSets = new List<MyAnimationSetData>();
 
         #endregion
 
@@ -87,6 +118,13 @@ namespace Sandbox.Game.Entities
             Render.CastShadows = true;
             Render.NeedsResolveCastShadow = false;
             Render.SkipIfTooSmall = false;
+
+            MyEntityTerrainHeightProviderComponent entityTerrainHeightComp = new MyEntityTerrainHeightProviderComponent();
+            Components.Add(entityTerrainHeightComp);
+            m_compAnimationController = new MyAnimationControllerComponent();
+            m_compAnimationController.ReloadBonesNeeded = ObtainBones;
+            m_compAnimationController.InverseKinematics.TerrainHeightProvider = entityTerrainHeightComp;
+            Components.Add(m_compAnimationController);
         }
 
         public override void Init(StringBuilder displayName,
@@ -109,37 +147,71 @@ namespace Sandbox.Game.Entities
             AddAnimationPlayer("", null);
         }
 
-        public virtual void UpdateAnimation()
+        public void SetBoneLODs(Dictionary<float, string[]> boneLODs)
         {
-            //if (Render.RenderObjectIDs.Length > 0 && MyRenderProxy.VisibleObjectsRead.Contains(Render.RenderObjectIDs[0]))
+            foreach (var animationPlayer in m_animationPlayers)
             {
-                AdvanceAnimation();
+                animationPlayer.Value.SetBoneLODs(boneLODs);
+            }
+        }
 
-                ProcessCommands();
+        public virtual void UpdateAnimation(float distance)
+        {
+            if (!MyPerGameSettings.AnimateOnlyVisibleCharacters || MySandboxGame.IsDedicated ||
+              (Render != null && Render.RenderObjectIDs.Length > 0 && MyRenderProxy.VisibleObjectsRead != null && MyRenderProxy.VisibleObjectsRead.Contains(Render.RenderObjectIDs[0])))
+            {
+                UpdateContinuingSets();
+
+                bool advanced = AdvanceAnimation();
+                bool processed = ProcessCommands();
 
                 UpdateAnimationState();
 
-                CalculateTransforms();
+                if (advanced || processed || UseNewAnimationSystem)
+                {
+                    CalculateTransforms(distance);
+                    UpdateRenderObject();
+                }
+            }
+            else
+            {
+                UpdateToolPosition();
+            }
 
-                UpdateRenderObject();
-                    
+            UpdateDecalPositions();
+        }
+
+
+        public virtual void UpdateToolPosition()
+        {
+
+        }
+      
+        void UpdateContinuingSets()
+        {
+            foreach (var animationSet in m_continuingAnimSets)
+            {
+                System.Diagnostics.Debug.Assert(animationSet.AnimationSet.Continuous, "Wrong animation set here!");
+                PlayAnimationSet(animationSet);
             }
         }
 
-        void UpdateBones()
+        void UpdateBones(float distance)
         {
             foreach (var animationPlayer in m_animationPlayers)
             {
-                animationPlayer.Value.UpdateBones();
+                animationPlayer.Value.UpdateBones(distance);
             }
         }
 
-        void AdvanceAnimation()
+        bool AdvanceAnimation()
         {
+            bool animationAdvanced = false;
             foreach (var animationPlayer in m_animationPlayers)
             {
-                animationPlayer.Value.Advance();
+                animationAdvanced = animationPlayer.Value.Advance() || animationAdvanced;
             }
+            return animationAdvanced;
         }
 
         void UpdateAnimationState()
@@ -154,23 +226,25 @@ namespace Sandbox.Game.Entities
         /// Get the bones from the model and create a bone class object for
         /// each bone. We use our bone class to do the real animated bone work.
         /// </summary>
-        protected virtual void ObtainBones()
+        public virtual void ObtainBones()
         {
-            m_bones.Clear();
-
-            foreach (MyModelBone bone in Model.Bones)
+            MyCharacterBone[] characterBones = new MyCharacterBone[Model.Bones.Length];
+            Matrix[] relativeTransforms = new Matrix[Model.Bones.Length];
+            Matrix[] absoluteTransforms = new Matrix[Model.Bones.Length];
+            for (int i = 0; i < Model.Bones.Length; i++)
             {
+                MyModelBone bone = Model.Bones[i];
                 Matrix boneTransform = bone.Transform;
-
                 // Create the bone object and add to the heirarchy
-                MyCharacterBone newBone = new MyCharacterBone(bone.Name, boneTransform, bone.Parent != -1 ? m_bones[bone.Parent] : null);
-
-                // Add to the bones for this model
-                m_bones.Add(newBone);
+                MyCharacterBone parent = bone.Parent != -1 ? characterBones[bone.Parent] : null;
+                MyCharacterBone newBone = new MyCharacterBone(
+                    bone.Name, parent, boneTransform, i, relativeTransforms, absoluteTransforms);
+                // Add to the bone array for this model
+                characterBones[i] = newBone;
             }
 
-            m_boneRelativeTransforms = new Matrix[m_bones.Count];
-            m_boneAbsoluteTransforms = new Matrix[m_bones.Count];
+            // pass array of bones to animation controller
+            m_compAnimationController.SetCharacterBones(characterBones, relativeTransforms, absoluteTransforms);
         }
 
         public Quaternion GetAdditionalRotation(string bone)
@@ -191,29 +265,9 @@ namespace Sandbox.Game.Entities
 
         #region Bones
 
-        public MyCharacterBone FindBone(string name, out int index)
-        {
-            index = -1;
-            if (name == null) return null;
-            foreach (MyCharacterBone bone in m_bones)
-            {
-                index++;
-
-                if (bone.Name == name)
-                    return bone;
-            }
-
-            if (MyFakes.ENABLE_BONES_AND_ANIMATIONS_DEBUG)
-            {
-                Debug.Fail("Warning! Bone with name: " + name + " was not found in the skeleton of model name: " + this.Model.AssetName + ". Pleace check your bone definitions in SBC file.");
-            }
-
-            return null;
-        }
-
         internal void AddAnimationPlayer(string name, string[] bones)
         {
-            m_animationPlayers.Add(name, new MyAnimationPlayerBlendPair(this, bones, name));
+            m_animationPlayers.Add(name, new MyAnimationPlayerBlendPair(this, bones, null, name));
         }
 
         internal bool TryGetAnimationPlayer(string name, out MyAnimationPlayerBlendPair player)
@@ -226,6 +280,77 @@ namespace Sandbox.Game.Entities
             return m_animationPlayers.TryGetValue(name, out player);
         }
 
+        internal DictionaryReader<string, MyAnimationPlayerBlendPair> GetAllAnimationPlayers()
+        {
+            return m_animationPlayers;
+        }
+
+        void PlayAnimationSet(MyAnimationSetData animationSetData)
+        {
+            if (MyRandom.Instance.NextFloat(0, 1) < animationSetData.AnimationSet.Probability)
+            {
+                float total = animationSetData.AnimationSet.AnimationItems.Sum(x => x.Ratio);
+                if (total > 0)
+                {
+                    float r = MyRandom.Instance.NextFloat(0, 1);
+                    float rel = 0;
+                    foreach (var animationItem in animationSetData.AnimationSet.AnimationItems)
+                    {
+                        rel += animationItem.Ratio / total;
+
+                        if (r < rel)
+                        {
+                            var command = new MyAnimationCommand()
+                            {
+                                AnimationSubtypeName = animationItem.Animation,
+                                PlaybackCommand = MyPlaybackCommand.Play,
+                                Area = animationSetData.Area,
+                                BlendTime = animationSetData.BlendTime,
+                                TimeScale = 1,
+                                KeepContinuingAnimations = true
+                            };
+
+                            ProcessCommand(ref command);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        internal void PlayersPlay(string bonesArea, MyAnimationDefinition animDefinition, bool firstPerson, MyFrameOption frameOption, float blendTime, float timeScale)
+        {
+            string[] players = bonesArea.Split(' ');
+
+            if (animDefinition.AnimationSets != null)
+            {
+                foreach (var animationSet in animDefinition.AnimationSets)
+                {
+                    var animationSetData = new MyAnimationSetData()
+                        {
+                            BlendTime = blendTime,
+                            Area = bonesArea,
+                            AnimationSet = animationSet
+                        };
+
+                    if (animationSet.Continuous)
+                    {
+                        m_continuingAnimSets.Add(animationSetData);
+                        continue;
+                    }
+
+                    PlayAnimationSet(animationSetData);
+                }
+
+                return;
+            }
+
+            foreach (var player in players)
+            {
+                PlayerPlay(player, animDefinition, firstPerson, frameOption, blendTime, timeScale);
+            }
+        }
+
         internal void PlayerPlay(string playerName, MyAnimationDefinition animDefinition, bool firstPerson, MyFrameOption frameOption, float blendTime, float timeScale)
         {
             MyAnimationPlayerBlendPair player;
@@ -233,8 +358,8 @@ namespace Sandbox.Game.Entities
             {
                 player.Play(animDefinition, firstPerson, frameOption, blendTime, timeScale);
             }
-       //     else
-         //       Debug.Fail("Non existing animation set");
+            //     else
+            //       Debug.Fail("Non existing animation set");
         }
 
         internal void PlayerStop(string playerName, float blendTime)
@@ -254,35 +379,52 @@ namespace Sandbox.Game.Entities
 
         #region Simulation
 
-        protected virtual void CalculateTransforms()
+        protected virtual void CalculateTransforms(float distance)
         {
             ProfilerShort.Begin("MySkinnedEntity.CalculateTransforms");
 
             VRageRender.MyRenderProxy.GetRenderProfiler().StartProfilingBlock("Clear bones");
-            foreach (var bone in Bones)
-            {
-                bone.Translation = Vector3.Zero;
-                bone.Rotation = Quaternion.Identity;
-            }
+            //foreach (var bone in Bones)
+            //{
+            //    bone.Translation = Vector3.Zero;
+            //    bone.Rotation = Quaternion.Identity;
+            //}
             VRageRender.MyRenderProxy.GetRenderProfiler().StartNextBlock("Update bones");
 
-            UpdateBones();
+            if (!UseNewAnimationSystem)
+            {
+                UpdateBones(distance);
+            }
 
             VRageRender.MyRenderProxy.GetRenderProfiler().StartNextBlock("ComputeAbsoluteTransforms");
-            for (int i = 0; i < Bones.Count; i++)
+            var characterBones = AnimationController.CharacterBones;
+            if (characterBones == null)
             {
-                MyCharacterBone bone = Bones[i];
-                bone.ComputeAbsoluteTransform();
-                m_boneRelativeTransforms[i] = bone.ComputeBoneTransform();                
-                BoneAbsoluteTransforms[i] = bone.AbsoluteTransform;
+                VRageRender.MyRenderProxy.GetRenderProfiler().EndProfilingBlock();
+                ProfilerShort.End();
+                return;
+            }
+            
+            MyCharacterBone.ComputeAbsoluteTransforms(AnimationController.CharacterBonesSorted);
+            for (int i = 0; i < characterBones.Length; i++)
+            {
+                AnimationController.BoneRelativeTransforms[i] = characterBones[i].RelativeTransform;
+                AnimationController.BoneAbsoluteTransforms[i] = characterBones[i].AbsoluteTransform;
             }
             VRageRender.MyRenderProxy.GetRenderProfiler().EndProfilingBlock();
-
-
             ProfilerShort.End();
         }
 
-        bool TryGetAnimationDefinition(string animationSubtypeName, out MyAnimationDefinition animDefinition)
+        /// <summary>
+        /// Try getting animation definition matching given subtype name.
+        /// VRage TODO: dependency on MyDefinitionManager, do we really need it here?
+        ///             backward compatibility is for modders?
+        ///             move backward compatibility to MyDefinitionManager.TryGetAnimationDefinition? then we do not need this method
+        ///             
+        ///             marked as obsolete, needs to be resolved
+        /// </summary>
+        [Obsolete]
+        protected bool TryGetAnimationDefinition(string animationSubtypeName, out MyAnimationDefinition animDefinition)
         {
             if (animationSubtypeName == null)
             {
@@ -313,76 +455,157 @@ namespace Sandbox.Game.Entities
             return true;
         }
 
-        protected void ProcessCommands()
+        /// <summary>
+        /// Process all commands in the animation queue at once. 
+        /// If any command is generated during flushing, it will be processed later.
+        /// </summary>
+        protected bool ProcessCommands()
         {
             if (m_commandQueue.Count > 0)
             {
-                MyAnimationCommand command = m_commandQueue.Peek();
-
-                if (command.PlaybackCommand == MyPlaybackCommand.Play)
-                {
-                    m_commandQueue.Dequeue();
-
-                    MyAnimationDefinition animDefinition;
-                    if (!TryGetAnimationDefinition(command.AnimationSubtypeName, out animDefinition))
-                        return;
-
-
-                    string bonesArea = animDefinition.InfluenceArea;
-                    var frameOption = command.FrameOption;
-                    bool useFirstPersonVersion = false;
-
-                    OnAnimationPlay(animDefinition, command, ref bonesArea, ref frameOption, ref useFirstPersonVersion);
-
-                    //override bones area if required
-                    if (!string.IsNullOrEmpty(command.Area))
-                        bonesArea = command.Area;
-
-                    if (bonesArea == null)
-                        bonesArea = "";
-
-                    string[] boneAreas = bonesArea.Split(' ');
-                    foreach (var boneArea in boneAreas)
-                    {
-                        PlayerPlay(boneArea, animDefinition, useFirstPersonVersion, frameOption, command.BlendTime, command.TimeScale);
-                    }
-                }
-
-                else
-                {
-                    System.Diagnostics.Debug.Assert(command.PlaybackCommand == MyPlaybackCommand.Stop, "Unknown playback command");
-
-                    m_commandQueue.Dequeue();
-
-                    string bonesArea = command.Area == null ? "" : command.Area;
-                    string[] boneAreas = bonesArea.Split(' ');
-
-                    foreach (var boneArea in boneAreas)
-                    {
-                        PlayerStop(boneArea, command.BlendTime);
-                    }
-                }
+                MyAnimationCommand command = m_commandQueue.Dequeue();
+                ProcessCommand(ref command);
+                return true;
+            }
+            else
+            {
+                return false;
             }
         }
 
+        /// <param name="position">Position of the decal in the binding pose</param>
+        protected void AddBoneDecal(uint decalId, Vector3 hitPosition, Vector3 hitNormal, int boneIndex)
+        {
+            List<MyDecalHitInfo> decals;
+            bool found = m_boneDecals.TryGetValue(boneIndex, out decals);
+            if (!found)
+            {
+                decals = new List<MyDecalHitInfo>(MAX_BONE_DECALS_COUNT);
+                m_boneDecals.Add(boneIndex, decals);
+            }
 
+            if (decals.Count == decals.Capacity)
+            {
+                MyDecals.RemoveDecal(decals[0].ID);
+                decals.RemoveAt(0);
+            }
+
+            decals.Add(new MyDecalHitInfo() { ID = decalId, Position = hitPosition, Normal = hitNormal });
+        }
+
+        private void UpdateDecalPositions()
+        {
+            m_decalUpdateCache.Clear();
+            foreach (var pair in m_boneDecals)
+            {
+                int boneIndex = pair.Key;
+                MyCharacterBone bone = AnimationController.CharacterBones[boneIndex];
+                bone.ComputeAbsoluteTransform();
+                Matrix boneTrans = bone.SkinTransform * bone.AbsoluteTransform;;
+                for (int it = 0; it < pair.Value.Count; it++)
+                {
+                    MyDecalHitInfo decal = pair.Value[it];
+                    Vector3 positionTrans = Vector3.Transform(decal.Position, ref boneTrans);
+                    Vector3 normalTrans = Vector3.TransformNormal(decal.Normal, boneTrans);
+                    m_decalUpdateCache.Add(new MyDecalPositionUpdate() { ID = decal.ID, Position = positionTrans, Normal = normalTrans });
+                }
+            }
+
+            MyDecals.UpdateDecals(m_decalUpdateCache);
+        }
+
+        /// <summary>
+        /// Process all commands in the animation queue at once. If any command is generated during flushing, it is processed as well.
+        /// </summary>
         protected void FlushAnimationQueue()
         {
             while (m_commandQueue.Count > 0)
                 ProcessCommands();
         }
 
+        /// <summary>
+        /// Process single animation command.
+        /// </summary>
+        void ProcessCommand(ref MyAnimationCommand command)
+        {
+            if (command.PlaybackCommand == MyPlaybackCommand.Play)
+            {
+                MyAnimationDefinition animDefinition;
+                if (!TryGetAnimationDefinition(command.AnimationSubtypeName, out animDefinition))
+                    return;
+
+                string bonesArea = animDefinition.InfluenceArea;
+                var frameOption = command.FrameOption;
+
+                if (frameOption == MyFrameOption.Default)
+                {
+                    frameOption = animDefinition.Loop ? MyFrameOption.Loop : MyFrameOption.PlayOnce;
+                }
+
+                bool useFirstPersonVersion = false;
+
+                OnAnimationPlay(animDefinition, command, ref bonesArea, ref frameOption, ref useFirstPersonVersion);
+
+                //override bones area if required
+                if (!string.IsNullOrEmpty(command.Area))
+                    bonesArea = command.Area;
+
+                if (bonesArea == null)
+                    bonesArea = "";
+
+                if (!command.KeepContinuingAnimations)
+                    m_continuingAnimSets.Clear();
+
+                if (UseNewAnimationSystem)
+                {
+                    // these commands are now completely ignored.
+                    //var animationLayer = AnimationController.Controller.GetLayerByName(bonesArea);
+                    //animationLayer.SetState(command.AnimationSubtypeName);
+                }
+                else
+                {
+                    PlayersPlay(bonesArea, animDefinition, useFirstPersonVersion, frameOption, command.BlendTime, command.TimeScale);
+                }
+            }
+            else if (command.PlaybackCommand == MyPlaybackCommand.Stop)
+            {
+                string bonesArea = command.Area == null ? "" : command.Area;
+                string[] boneAreas = bonesArea.Split(' ');
+
+                if (UseNewAnimationSystem)
+                {
+
+                }
+                else
+                {
+                    foreach (var boneArea in boneAreas)
+                    {
+                        PlayerStop(boneArea, command.BlendTime);
+                    }
+                }
+            }
+            else
+            {
+                System.Diagnostics.Debug.Fail("Unknown playback command");
+            }
+        }
+
+        /// <summary>
+        /// Enqueue animation command. Parameter sync is used in child classes.
+        /// </summary>
         public virtual void AddCommand(MyAnimationCommand command, bool sync = false)
         {
-            if (command.PlaybackCommand == MyPlaybackCommand.Play && command.BlendOption == MyBlendOption.Immediate)
-            {
-                m_commandQueue.Clear();
-            }
+            //if (command.PlaybackCommand == MyPlaybackCommand.Play && command.BlendOption == MyBlendOption.Immediate)
+            //{
+            //    m_commandQueue.Clear();
+            //}
 
             m_commandQueue.Enqueue(command);
         }
 
-
+        /// <summary>
+        /// Virtual method called when animation is started, used in MyCharacter.
+        /// </summary>
         protected virtual void OnAnimationPlay(MyAnimationDefinition animDefinition, MyAnimationCommand command, ref string bonesArea, ref MyFrameOption frameOption, ref bool useFirstPersonVersion)
         {
         }
@@ -391,10 +614,11 @@ namespace Sandbox.Game.Entities
         {
             m_actualWorldAABB = BoundingBoxD.CreateInvalid();
 
+            if (AnimationController.CharacterBones != null)
             for (int i = 1; i < Model.Bones.Length; i++)
             {
-                Vector3D p1 = Vector3D.Transform(Bones[i].Parent.AbsoluteTransform.Translation, WorldMatrix);
-                Vector3D p2 = Vector3D.Transform(Bones[i].AbsoluteTransform.Translation, WorldMatrix);
+                Vector3D p1 = Vector3D.Transform(AnimationController.CharacterBones[i].Parent.AbsoluteTransform.Translation, WorldMatrix);
+                Vector3D p2 = Vector3D.Transform(AnimationController.CharacterBones[i].AbsoluteTransform.Translation, WorldMatrix);
 
                 m_actualWorldAABB.Include(ref p1);
                 m_actualWorldAABB.Include(ref p2);
@@ -414,5 +638,11 @@ namespace Sandbox.Game.Entities
 
         #endregion
 
+        struct MyDecalHitInfo
+        {
+            public uint ID;
+            public Vector3 Position;
+            public Vector3 Normal;
+        }
     }
 }
